@@ -1,6 +1,6 @@
 `timescale 1ps/1ps
 
-module semiDualPortSSRAMTestBench;
+module sdp_ram_tb;
   reg clk; 
   reg reset;
   reg we;
@@ -8,7 +8,7 @@ module semiDualPortSSRAMTestBench;
   reg [31:0] dataIn;
   wire [31:0] dataOutA, dataOutB;
   
-  semiDualPortSSRAM DUT (
+  sdp_ram dut (
     .clkA(clk), 
     .clkB(clk), 
     .we(we),
@@ -40,7 +40,7 @@ module semiDualPortSSRAMTestBench;
   initial
     begin
       $dumpfile("mem.vcd");    /* define the name of the .vcd file that can be viewed by GTKWAVE */
-      $dumpvars(0, semiDualPortSSRAMTestBench); /* dump all signals inside the DUT-component in the .vcd file */
+      $dumpvars(1, sdp_ram_tb); /* dump all signals inside the DUT-component in the .vcd file */
     end
 
   initial begin

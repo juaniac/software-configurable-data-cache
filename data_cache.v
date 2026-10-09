@@ -25,6 +25,7 @@ module data_cache (
   input  wire          i_wb_ack,
   input  wire          i_wb_err
 );
+
 localparam PARAM_NB_WAYS = 1; // 0 or 1 or 2 or 4
 localparam PARAM_SIZE = 8192; // 8192 or 4096 or 2048 or 1024
 localparam PARAM_WORD_PER_LINE = 4; // 4 or 8 or 16 or 32
@@ -85,24 +86,24 @@ always @(posedge i_clk) begin
   end
 end
 
-reg        meta_update_we   [3:0];
-reg [8:0]  meta_update_addr [3:0];
-reg [8:0]  meta_lookup_addr [3:0];
-reg [31:0] meta_update_in   [3:0];
-reg [31:0] meta_update_out  [3:0];
-reg [31:0] meta_lookup_out  [3:0];
+reg         meta_update_we   [3:0];
+reg  [8:0]  meta_update_addr [3:0];
+reg  [8:0]  meta_lookup_addr [3:0];
+reg  [31:0] meta_update_in   [3:0];
+wire [31:0] meta_update_out  [3:0];
+wire [31:0] meta_lookup_out  [3:0];
 
-reg        data_update_we   [3:0];
-reg [8:0]  data_update_addr [3:0];
-reg [8:0]  data_lookup_addr [3:0];
-reg [31:0] data_update_in   [3:0];
-reg [31:0] data_update_out  [3:0];
-reg [31:0] data_lookup_out  [3:0];
+reg         data_update_we   [3:0];
+reg  [8:0]  data_update_addr [3:0];
+reg  [8:0]  data_lookup_addr [3:0];
+reg  [31:0] data_update_in   [3:0];
+wire [31:0] data_update_out  [3:0];
+wire [31:0] data_lookup_out  [3:0];
 
 genvar i;
 generate
   for (i = 0; i < 4; i=i+1) begin
-    semiDualPortSSRAM metadata_memory (
+    sdp_ram metadata_memory (
       .clkA(i_clk), 
       .clkB(i_clk), 
       .we(meta_update_we[i]),
@@ -112,7 +113,7 @@ generate
       .dataOutA(meta_update_out[i]), 
       .dataOutB(meta_lookup_out[i])
     );
-    semiDualPortSSRAM data_memory (
+    sdp_ram data_memory (
       .clkA(i_clk), 
       .clkB(i_clk), 
       .we(data_update_we[i]),
@@ -180,15 +181,15 @@ always @(*)begin
   endcase
 end
 
-reg [31:0] lookup_tag   [3:0];
-reg        lookup_dirty [3:0];
-reg        lookup_valid [3:0];
+wire [31:0] lookup_tag   [3:0];
+wire        lookup_dirty [3:0];
+wire        lookup_valid [3:0];
 genvar j;
 generate
   for (j = 0; j < 4; j=j+1) begin
-	  assign lookup_tag[i]   = meta_lookup_out[i] & tag_mask;
-	  assign lookup_dirty[i] = (meta_lookup_out[i] & dirty_mask)[1];
-    assign lookup_valid[i] = (meta_lookup_out[i] & valid_mask)[0];
+	  assign lookup_tag[j]   = meta_lookup_out[j] & tag_mask;
+	  assign lookup_dirty[j] = |(meta_lookup_out[j] & dirty_mask);
+    assign lookup_valid[j] = |(meta_lookup_out[j] & valid_mask);
   end
 endgenerate
 

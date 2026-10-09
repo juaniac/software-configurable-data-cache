@@ -1,4 +1,4 @@
-module semiDualPortSSRAM # (
+module sdp_ram # (
   parameter bitwidth = 32,
   parameter nrOfEntries = 512
 )(
