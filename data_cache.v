@@ -49,6 +49,7 @@ localparam STATE_UPDATE_META    = 4'b1000;
 localparam STATE_REDO_ADDR      = 4'b1001;
 localparam STATE_MEM_ERR        = 4'b1010;
 
+reg hit, miss_dirty, done_mem_write, done_mem_read; 
 always @(posedge i_clk) begin
   if(~i_rst_n) begin
     state <= STATE_ADDR;
@@ -194,7 +195,6 @@ generate
 endgenerate
 
 reg [1:0] hit_way_id;
-reg       hit;
 always @(*)begin
   hit = 1'b0;
   hit_way_id = 2'b00;
@@ -224,8 +224,23 @@ always @(*)begin
   end
 end
 
-always @(*)begin
-  
+reg [1:0] miss_way_id;
+always @(posedge i_clk) begin
+  if(state == STATE_LOOKUP)begin
+    case (PARAM_NB_WAYS)
+      1:       miss_way_id <= req_line[8:7];
+      2:       miss_way_id <= req_addr[7] + rp_way_id;
+      default: miss_way_id <= rp_way_id;
+    endcase
+  end
+end
+
+always @(*) begin
+  miss_dirty = 1'b00;
+  if(state == STATE_LOOKUP & PARAM_NB_WAYS == 1 |
+     state == STATE_REPL_POLICY) begin
+    miss_dirty = lookup_dirty[] & |(metadata_memory & valid_mask);
+  end
 end
 
 endmodule
