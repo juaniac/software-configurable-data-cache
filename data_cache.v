@@ -29,6 +29,10 @@ module data_cache (
 localparam PARAM_NB_WAYS = 1; // 0 or 1 or 2 or 4
 localparam PARAM_SIZE = 8192; // 8192 or 4096 or 2048 or 1024
 localparam PARAM_WORD_PER_LINE = 4; // 4 or 8 or 16 or 32
+localparam PARAM_REPLACEMENT_POLICY = 0; 
+localparam RP_ROUND_ROBIN = 0;
+localparam RP_PLRU = 1;
+localparam RP_LRU  = 2;
 
 localparam WB_BTE_LINEAR_BURST = 2'b00;
 
@@ -101,9 +105,8 @@ reg  [31:0] data_update_in   [3:0];
 wire [31:0] data_update_out  [3:0];
 wire [31:0] data_lookup_out  [3:0];
 
-genvar i;
 generate
-  for (i = 0; i < 4; i=i+1) begin
+  for (genvar i = 0; i < 4; i=i+1) begin
     sdp_ram metadata_memory (
       .clkA(i_clk), 
       .clkB(i_clk), 
@@ -185,12 +188,13 @@ end
 wire [31:0] lookup_tag   [3:0];
 wire        lookup_dirty [3:0];
 wire        lookup_valid [3:0];
-genvar j;
+wire        lookup_hit   [3:0];
 generate
-  for (j = 0; j < 4; j=j+1) begin
-	  assign lookup_tag[j]   = meta_lookup_out[j] & tag_mask;
-	  assign lookup_dirty[j] = |(meta_lookup_out[j] & dirty_mask);
-    assign lookup_valid[j] = |(meta_lookup_out[j] & valid_mask);
+  for (genvar i = 0; i < 4; i=i+1) begin
+	  assign lookup_tag[i]   = meta_lookup_out[i] & tag_mask;
+    assign lookup_valid[i] = |(meta_lookup_out[i] & valid_mask);
+    assign lookup_hit[i]   = lookup_valid[i] & (lookup_tag[i] == req_tag);
+    assign lookup_dirty[i] = lookup_valid[i] & ((meta_lookup_out[i] & dirty_mask) >> 1);
   end
 endgenerate
 
@@ -201,45 +205,212 @@ always @(*)begin
   if(state == STATE_CACHE)begin
     case (PARAM_NB_WAYS)
       1:begin
-        hit = lookup_valid[req_line[8:7]] & (lookup_tag[req_line[8:7]] == req_tag);
-        hit_way_id = lookup_valid[req_line[8:7]] & (lookup_tag[req_line[8:7]] == req_tag) ? req_line[8:7] : 2'b00;
+        hit = lookup_hit[req_line[8:7]];
+        hit_way_id = lookup_hit[req_line[8:7]] ? req_line[8:7] : 2'b00;
       end
       2: begin
-        hit = lookup_valid[req_line[7]] & (lookup_tag[req_line[7]] == req_tag) |
-              lookup_valid[req_line[7]+2] & (lookup_tag[req_line[7]+2] == req_tag);
-        hit_way_id = lookup_valid[req_line[7]] & (lookup_tag[req_line[7]] == req_tag) ? req_line[7] :
-                     lookup_valid[req_line[7]+2] & (lookup_tag[req_line[7]+2] == req_tag) ? req_line[7]+2 : 2'b00;
+        hit = lookup_hit[{1'b0, req_line[7]}] |
+              lookup_hit[{1'b1, req_line[7]}];
+        hit_way_id = lookup_hit[{1'b0, req_line[7]}] ? {1'b0, req_line[7]} :
+                     lookup_hit[{1'b1, req_line[7]}] ? {1'b1, req_line[7]} : 2'b00;
       end
       default: begin
-        hit = lookup_valid[0] & (lookup_tag[0] == req_tag) |
-              lookup_valid[1] & (lookup_tag[1] == req_tag) |
-              lookup_valid[2] & (lookup_tag[2] == req_tag) |
-              lookup_valid[3] & (lookup_tag[3] == req_tag);
-        hit_way_id = lookup_valid[0] & (lookup_tag[0] == req_tag) ? 2'b00 :
-                     lookup_valid[1] & (lookup_tag[1] == req_tag) ? 2'b01 :
-                     lookup_valid[2] & (lookup_tag[2] == req_tag) ? 2'b10 :
-                     lookup_valid[3] & (lookup_tag[3] == req_tag) ? 2'b11 : 2'b00;
+        hit = lookup_hit[0] |
+              lookup_hit[1] |
+              lookup_hit[2] |
+              lookup_hit[3];
+        hit_way_id = lookup_hit[0] ? 2'b00 :
+                     lookup_hit[1] ? 2'b01 :
+                     lookup_hit[2] ? 2'b10 :
+                     lookup_hit[3] ? 2'b11 : 2'b00;
       end
+    endcase
+  end
+end
+
+reg [1:0] rp_way_id;
+always @(*) begin
+  rp_way_id = 2'b00;
+  if(state == STATE_LOOKUP)begin
+    case (PARAM_REPLACEMENT_POLICY)
+      RP_ROUND_ROBIN: rp_way_id = meta_lookup_out[0][3:2];  
+      // TODO REST OF REPLACEMENT POLICIES
     endcase
   end
 end
 
 reg [1:0] miss_way_id;
-always @(posedge i_clk) begin
+always @(*) begin
+  miss_way_id = 2'b00;
   if(state == STATE_LOOKUP)begin
     case (PARAM_NB_WAYS)
-      1:       miss_way_id <= req_line[8:7];
-      2:       miss_way_id <= req_addr[7] + rp_way_id;
-      default: miss_way_id <= rp_way_id;
+      1:       miss_way_id = req_line[8:7];
+      2:       miss_way_id = {rp_way_id[0], req_addr[7]};
+      default: miss_way_id = rp_way_id;
     endcase
   end
 end
 
 always @(*) begin
-  miss_dirty = 1'b00;
-  if(state == STATE_LOOKUP & PARAM_NB_WAYS == 1 |
-     state == STATE_REPL_POLICY) begin
-    miss_dirty = lookup_dirty[] & |(metadata_memory & valid_mask);
+  miss_dirty = 1'b0;
+  if(state == STATE_LOOKUP) begin
+    miss_dirty = lookup_dirty[miss_way_id];
+  end
+end
+
+reg [1:0] req_way_id;
+always @(*) begin
+  if(state == STATE_LOOKUP) begin
+    req_way_id <= miss_way_id;
+  end
+end
+
+generate
+  for (genvar i = 0; i < 4; i=i+1) begin
+    always @(*) begin
+      meta_lookup_addr[i] = 9'b0;
+      data_lookup_addr[i] = 9'b0;
+      if(state == STATE_ADDR | 
+         state == STATE_CACHE)begin
+        meta_lookup_addr[i] = i_ahb5_addr[10:4]; 
+        data_lookup_addr[i] = i_ahb5_addr[10:2];
+      end else if(state == STATE_REDO_ADDR)begin
+        meta_lookup_addr[i] = req_addr[10:4]; 
+        data_lookup_addr[i] = req_addr[10:2];
+      end
+   end
+  end 
+endgenerate
+
+reg [4:0] wb_word;
+always @(posedge i_clk) begin
+  wb_word <= 5'b0;
+  if(state == STATE_MEM_WRITE |
+     state == STATE_MEM_READ)begin
+    wb_word <= wb_word;
+    if(i_wb_ack)begin
+      wb_word <= wb_word + 1;
+    end
+  end
+end
+
+always @(*)begin
+  done_mem_read  = 1'b0;
+  done_mem_write = 1'b0;
+  if(state == STATE_MEM_WRITE)
+    done_mem_write = (wb_word == PARAM_WORD_PER_LINE-1) & i_wb_ack;
+  else if(state == STATE_MEM_READ)
+    done_mem_read  = (wb_word == PARAM_WORD_PER_LINE-1) & i_wb_ack;
+end
+
+always @(*)begin
+  data_update_addr[0] = 9'b0;
+  data_update_addr[1] = 9'b0;
+  data_update_addr[2] = 9'b0;
+  data_update_addr[3] = 9'b0;
+  data_update_we[0]   = 1'b0;
+  data_update_we[1]   = 1'b0;
+  data_update_we[2]   = 1'b0;
+  data_update_we[3]   = 1'b0;
+  data_update_in[0]   = 32'b0;
+  data_update_in[1]   = 32'b0;
+  data_update_in[2]   = 32'b0;
+  data_update_in[3]   = 32'b0;
+  if(state == STATE_CACHE & req_we & hit)begin
+    data_update_addr[hit_way_id] = req_addr[10:2];
+    data_update_we[hit_way_id]   = 1'b1;
+    data_update_in[hit_way_id]   = 
+      (i_ahb5_wdata & req_data_mask) | 
+      (data_lookup_out[hit_way_id] & ~req_data_mask);
+  end 
+  else if(state == STATE_MEM_WRITE_INIT)begin
+    data_update_addr[req_way_id] = (req_addr[10:4])<<2;
+  end 
+  else if(state == STATE_MEM_WRITE)begin
+    data_update_addr[req_way_id] = (req_addr[10:4])<<2 + wb_word;
+    if(i_wb_ack)begin
+      data_update_addr[req_way_id] = (req_addr[10:4])<<2 + wb_word + 1;
+    end
+  end 
+  else if(state == STATE_MEM_READ & i_wb_ack)begin
+    data_update_addr[req_way_id] = (req_addr[10:4])<<2 + wb_word;
+    data_update_we[req_way_id]   = 1'b1;
+    data_update_in[req_way_id]   = i_wb_rdata;
+  end
+end
+
+always @(*) begin
+  meta_update_addr[0] = 9'b0;
+  meta_update_addr[1] = 9'b0;
+  meta_update_addr[2] = 9'b0;
+  meta_update_addr[3] = 9'b0;
+  meta_update_we[0]   = 1'b0;
+  meta_update_we[1]   = 1'b0;
+  meta_update_we[2]   = 1'b0;
+  meta_update_we[3]   = 1'b0;
+  meta_update_in[0]   = 32'b0;
+  meta_update_in[1]   = 32'b0;
+  meta_update_in[2]   = 32'b0;
+  meta_update_in[3]   = 32'b0;
+  if(state == STATE_CACHE & req_we & hit & ~lookup_dirty[hit_way_id])begin
+    meta_update_addr[hit_way_id] = req_addr[10:4];
+    meta_update_we[hit_way_id]   = 1'b1;
+    meta_update_in[hit_way_id]   = meta_lookup_out[hit_way_id] | dirty_mask;
+  end 
+  else if(state == STATE_MEM_WRITE_INIT |
+          state == STATE_MEM_WRITE)begin
+    meta_update_addr[req_way_id] = req_addr[10:4];
+  end
+  else if(state == STATE_UPDATE_META)begin
+    meta_update_addr[req_way_id] = req_addr[10:4]; 
+    meta_update_we[req_way_id]   = 1'b1;
+    meta_update_in[req_way_id]   = req_tag | valid_mask;
+  end
+end
+
+always @(*) begin
+  o_wb_cyc   = 1'b0;
+  o_wb_stb   = 1'b0;
+  o_wb_we    = 1'b0;
+  o_wb_bte   = 2'b0;
+  o_wb_cti   = 3'b0;
+  o_wb_sel   = 4'b0;
+  o_wb_addr  = 32'b0;
+  o_wb_wdata = 32'b0;
+  if(state == STATE_MEM_WRITE)begin
+    o_wb_cyc   = 1'b1;
+    o_wb_stb   = 1'b1;
+    o_wb_we    = 1'b1;
+    o_wb_bte   = WB_BTE_LINEAR_BURST;
+    o_wb_cti   = (wb_word < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
+    o_wb_sel   = 4'b1111;
+    o_wb_addr  = 
+      (meta_update_out[req_way_id] & tag_mask) |
+      req_line |
+      (wb_word << 2);
+    o_wb_wdata = data_update_out[req_way_id];
+  end
+  else if(state == STATE_MEM_READ)begin
+    o_wb_cyc   = 1'b1;
+    o_wb_stb   = 1'b1;
+    o_wb_we    = 1'b0;
+    o_wb_bte   = WB_BTE_LINEAR_BURST;
+    o_wb_cti   = (wb_word < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
+    o_wb_sel   = 4'b1111;
+    o_wb_addr  = req_tag | req_line | (wb_word << 2);
+  end
+end
+
+always @(*) begin
+  o_ahb5_rdata = 32'b0;
+  o_ahb5_ready = 1'b0;
+  if(state == STATE_ADDR |
+    (state == STATE_CACHE & hit & req_we))begin
+    o_ahb5_ready = 1'b1;
+  end
+  if(state == STATE_CACHE & hit & ~req_we)begin
+    o_ahb5_ready = 1'b1;
+    o_ahb5_rdata = data_lookup_out[hit_way_id] & req_data_mask;
   end
 end
 
