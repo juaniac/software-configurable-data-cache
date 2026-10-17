@@ -21,10 +21,8 @@ endef
 
 	$(eval TB_MODULE := $(shell grep -m 1 "module" $(TB) | sed -e 's/module\s\+\([a-zA-Z0-9_]\+\).*/\1/'))
 	
-	# Compile with the testbench module specified
 	$ iverilog -s $(TB_MODULE) -o $(OUT_EXE) $(DEPS) $(TB)
 
-	# Run
 	./$(OUT_EXE)
 
 clean:

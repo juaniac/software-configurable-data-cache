@@ -44,7 +44,6 @@ reg [2:0] state;
 localparam STATE_ADDR           = 4'b0000;
 localparam STATE_CACHE          = 4'b0001;
 localparam STATE_LOOKUP         = 4'b0010;
-localparam STATE_REPL_POLICY    = 4'b0011;
 localparam STATE_MEM_WRITE_INIT = 4'b0100;
 localparam STATE_MEM_WRITE      = 4'b0101;
 localparam STATE_MEM_WAIT       = 4'b0110;
@@ -52,9 +51,10 @@ localparam STATE_MEM_READ       = 4'b0111;
 localparam STATE_UPDATE_META    = 4'b1000;
 localparam STATE_REDO_ADDR      = 4'b1001;
 localparam STATE_MEM_ERR        = 4'b1010;
+localparam STATE_CLEANUP        = 4'b1010;
 
 reg hit, miss_dirty, done_mem_write, done_mem_read; 
-always @(posedge i_clk) begin
+always @(posedge i_clk or negedge i_rst_n) begin
   if(~i_rst_n) begin
     state <= STATE_ADDR;
   end else begin
@@ -98,12 +98,20 @@ reg  [31:0] meta_update_in   [3:0];
 wire [31:0] meta_update_out  [3:0];
 wire [31:0] meta_lookup_out  [3:0];
 
+reg         meta_fwd_valid   [3:0];
+reg  [31:0] meta_fwd_data    [3:0];
+wire [31:0] meta_lookup_out_ [3:0];
+
 reg         data_update_we   [3:0];
 reg  [8:0]  data_update_addr [3:0];
 reg  [8:0]  data_lookup_addr [3:0];
 reg  [31:0] data_update_in   [3:0];
 wire [31:0] data_update_out  [3:0];
 wire [31:0] data_lookup_out  [3:0];
+
+reg         data_fwd_valid   [3:0];
+reg  [31:0] data_fwd_data    [3:0];
+wire [31:0] data_lookup_out_ [3:0];
 
 generate
   for (genvar i = 0; i < 4; i=i+1) begin
@@ -115,8 +123,15 @@ generate
       .addrB(meta_lookup_addr[i]),
       .dataIn(meta_update_in[i]),
       .dataOutA(meta_update_out[i]), 
-      .dataOutB(meta_lookup_out[i])
+      .dataOutB(meta_lookup_out_[i])
     );
+
+    always @(posedge i_clk)begin
+      meta_fwd_data[i] <= meta_update_in[i];
+      meta_fwd_valid[i] <= (meta_update_addr[i] == meta_lookup_addr[i]) & meta_update_we[i];
+    end
+    assign meta_lookup_out[i] = meta_fwd_valid[i] ? meta_fwd_data[i] : meta_lookup_out_[i];
+
     sdp_ram data_memory (
       .clkA(i_clk), 
       .clkB(i_clk), 
@@ -125,8 +140,15 @@ generate
       .addrB(data_lookup_addr[i]),
       .dataIn(data_update_in[i]),
       .dataOutA(data_update_out[i]), 
-      .dataOutB(data_lookup_out[i])
+      .dataOutB(data_lookup_out_[i])
     );
+
+    always @(posedge i_clk)begin
+      data_fwd_data[i] <= data_update_in[i];
+      data_fwd_valid[i] <= (data_update_addr[i] == data_lookup_addr[i]) & data_update_we[i];
+    end
+    assign data_lookup_out[i] = data_fwd_valid[i] ? data_fwd_data[i] : data_lookup_out_[i];
+    
   end
 endgenerate
 
@@ -140,7 +162,7 @@ assign valid_mask = 32'b1;
 reg [31:0] req_addr;
 reg [2:0]  req_size;
 reg        req_we;
-always @(posedge i_clk)begin
+always @(posedge i_clk or negedge i_rst_n)begin
   if(~i_rst_n)begin
     req_addr <= 32'b0;
     req_size <= 3'b0;
@@ -260,8 +282,16 @@ end
 
 reg [1:0] req_way_id;
 always @(*) begin
-  if(state == STATE_LOOKUP) begin
-    req_way_id <= miss_way_id;
+  req_way_id = 2'b00;
+  if(state == STATE_CACHE)
+    req_way_id = hit_way_id;
+  else if(state == STATE_LOOKUP | 
+          state == STATE_MEM_WRITE_INIT |
+          state == STATE_MEM_WRITE |
+          state == STATE_MEM_READ |
+          state == STATE_UPDATE_META
+          ) begin
+    req_way_id = miss_way_id;
   end
 end
 
@@ -287,10 +317,13 @@ always @(posedge i_clk) begin
   wb_word <= 5'b0;
   if(state == STATE_MEM_WRITE |
      state == STATE_MEM_READ)begin
-    wb_word <= wb_word;
-    if(i_wb_ack)begin
+    if(done_mem_read |
+       done_mem_write)
+      wb_word <= 5'b0;
+    else if(i_wb_ack)
       wb_word <= wb_word + 1;
-    end
+    else
+     wb_word <= wb_word;
   end
 end
 
@@ -317,11 +350,11 @@ always @(*)begin
   data_update_in[2]   = 32'b0;
   data_update_in[3]   = 32'b0;
   if(state == STATE_CACHE & req_we & hit)begin
-    data_update_addr[hit_way_id] = req_addr[10:2];
-    data_update_we[hit_way_id]   = 1'b1;
-    data_update_in[hit_way_id]   = 
+    data_update_addr[req_way_id] = req_addr[10:2];
+    data_update_we[req_way_id]   = 1'b1;
+    data_update_in[req_way_id]   = 
       (i_ahb5_wdata & req_data_mask) | 
-      (data_lookup_out[hit_way_id] & ~req_data_mask);
+      (data_lookup_out[req_way_id] & ~req_data_mask);
   end 
   else if(state == STATE_MEM_WRITE_INIT)begin
     data_update_addr[req_way_id] = (req_addr[10:4])<<2;
@@ -352,10 +385,10 @@ always @(*) begin
   meta_update_in[1]   = 32'b0;
   meta_update_in[2]   = 32'b0;
   meta_update_in[3]   = 32'b0;
-  if(state == STATE_CACHE & req_we & hit & ~lookup_dirty[hit_way_id])begin
-    meta_update_addr[hit_way_id] = req_addr[10:4];
-    meta_update_we[hit_way_id]   = 1'b1;
-    meta_update_in[hit_way_id]   = meta_lookup_out[hit_way_id] | dirty_mask;
+  if(state == STATE_CACHE & hit & req_we & ~lookup_dirty[req_way_id])begin
+    meta_update_addr[req_way_id] = req_addr[10:4];
+    meta_update_we[req_way_id]   = 1'b1;
+    meta_update_in[req_way_id]   = meta_lookup_out[req_way_id] | dirty_mask;
   end 
   else if(state == STATE_MEM_WRITE_INIT |
           state == STATE_MEM_WRITE)begin
@@ -384,10 +417,7 @@ always @(*) begin
     o_wb_bte   = WB_BTE_LINEAR_BURST;
     o_wb_cti   = (wb_word < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
     o_wb_sel   = 4'b1111;
-    o_wb_addr  = 
-      (meta_update_out[req_way_id] & tag_mask) |
-      req_line |
-      (wb_word << 2);
+    o_wb_addr  = (meta_update_out[req_way_id] & tag_mask) | req_line | (wb_word << 2);
     o_wb_wdata = data_update_out[req_way_id];
   end
   else if(state == STATE_MEM_READ)begin
@@ -405,11 +435,10 @@ always @(*) begin
   o_ahb5_rdata = 32'b0;
   o_ahb5_ready = 1'b0;
   if(state == STATE_ADDR |
-    (state == STATE_CACHE & hit & req_we))begin
+    (state == STATE_CACHE & hit))begin
     o_ahb5_ready = 1'b1;
   end
   if(state == STATE_CACHE & hit & ~req_we)begin
-    o_ahb5_ready = 1'b1;
     o_ahb5_rdata = data_lookup_out[hit_way_id] & req_data_mask;
   end
 end
