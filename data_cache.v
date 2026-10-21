@@ -44,14 +44,13 @@ reg [3:0] cstate;
 localparam CSTATE_ADDR           = 4'b0000;
 localparam CSTATE_CACHE          = 4'b0001;
 localparam CSTATE_LOOKUP         = 4'b0010;
-localparam CSTATE_MEM_WRITE_INIT = 4'b0011;
-localparam CSTATE_MEM_WRITE      = 4'b0100;
-localparam CSTATE_MEM_WAIT       = 4'b0101;
-localparam CSTATE_MEM_READ       = 4'b0110;
-localparam CSTATE_UPDATE_META    = 4'b0111;
-localparam CSTATE_REDO_ADDR      = 4'b1000;
-localparam CSTATE_MEM_ERR        = 4'b1001;
-localparam CSTATE_CLEANUP        = 4'b1010;
+localparam CSTATE_MEM_WRITE      = 4'b0011;
+localparam CSTATE_MEM_WAIT       = 4'b0100;
+localparam CSTATE_MEM_READ       = 4'b0101;
+localparam CSTATE_UPDATE_META    = 4'b0110;
+localparam CSTATE_REDO_ADDR      = 4'b0111;
+localparam CSTATE_MEM_ERR        = 4'b1000;
+localparam CSTATE_CLEANUP        = 4'b1001;
 
 reg hit, miss_dirty, wb_transfer_done; 
 always @(posedge i_clk or negedge i_rst_n) begin
@@ -67,10 +66,8 @@ always @(posedge i_clk or negedge i_rst_n) begin
                   (hit & i_ahb5_trans[1])  ? CSTATE_CACHE :
                                              CSTATE_LOOKUP;
       CSTATE_LOOKUP: 
-        cstate <= (miss_dirty) ? CSTATE_MEM_WRITE_INIT :
+        cstate <= (miss_dirty) ? CSTATE_MEM_WRITE :
                                  CSTATE_MEM_READ; 
-      CSTATE_MEM_WRITE_INIT:
-        cstate <= CSTATE_MEM_WRITE;
       CSTATE_MEM_WRITE:
         cstate <= (i_wb_err)         ? CSTATE_MEM_ERR : 
                   (wb_transfer_done) ? CSTATE_MEM_WAIT :
@@ -282,7 +279,6 @@ always @(*) begin
   if(cstate == CSTATE_CACHE)
     req_way_id = hit_way_id;
   else if(cstate == CSTATE_LOOKUP | 
-          cstate == CSTATE_MEM_WRITE_INIT |
           cstate == CSTATE_MEM_WRITE |
           cstate == CSTATE_MEM_READ |
           cstate == CSTATE_UPDATE_META)
@@ -292,13 +288,11 @@ end
 generate
   for (genvar i = 0; i < 4; i=i+1) begin
     always @(*) begin
-      meta_lookup_addr[i] = 9'b0;
-      data_lookup_addr[i] = 9'b0;
       if(cstate == CSTATE_ADDR | 
-         cstate == CSTATE_CACHE)begin
+         cstate == CSTATE_CACHE & hit)begin
         meta_lookup_addr[i] = i_ahb5_addr[10:4]; 
         data_lookup_addr[i] = i_ahb5_addr[10:2];
-      end else if(cstate == CSTATE_REDO_ADDR)begin
+      end else begin
         meta_lookup_addr[i] = req_addr[10:4]; 
         data_lookup_addr[i] = req_addr[10:2];
       end
@@ -306,25 +300,52 @@ generate
   end 
 endgenerate
 
-reg [4:0] wb_word_offset;
-always @(posedge i_clk) begin
-  wb_word_offset <= 5'b0;
-  if(cstate == CSTATE_MEM_WRITE |
-     cstate == CSTATE_MEM_READ)begin
-    if(wb_transfer_done)
-      wb_word_offset <= 5'b0;
-    else if(i_wb_ack)
+reg [1:0] wbstate;
+localparam WBSTATE_IDLE       = 2'b00;
+localparam WBSTATE_WDATA_WAIT = 2'b01;
+localparam WBSTATE_TRANSFER   = 2'b10;
+
+reg        wb_transfer_we;
+reg  [5:0] wb_transfer_size;
+reg [31:0] wb_transfer_base_addr;
+reg  [4:0] wb_word_offset;
+always @(posedge i_clk or negedge i_rst_n)begin
+  if(~i_rst_n)begin
+    wbstate               <= WBSTATE_IDLE;
+    wb_transfer_we        <= 1'b0;
+    wb_transfer_size      <= 6'b0;
+    wb_transfer_base_addr <= 32'b0;
+    wb_word_offset        <= 4'b0;
+  end
+  else begin
+    if(cstate == CSTATE_LOOKUP & miss_dirty)begin
+      wbstate               <= WBSTATE_WDATA_WAIT;
+      wb_transfer_we        <= 1'b1;
+      wb_transfer_size      <= 4;
+      wb_transfer_base_addr <= lookup_tag[req_way_id] | req_line;
+      wb_word_offset        <= 4'b0;
+    end 
+    else if((cstate == CSTATE_LOOKUP & ~miss_dirty) |
+             cstate == CSTATE_MEM_WAIT)begin
+      wbstate               <= WBSTATE_TRANSFER;
+      wb_transfer_we        <= 1'b0;
+      wb_transfer_size      <= 4;
+      wb_transfer_base_addr <= req_tag | req_line;
+      wb_word_offset        <= 4'b0;
+    end 
+
+    if(wbstate == WBSTATE_WDATA_WAIT)
+      wbstate <= WBSTATE_TRANSFER;
+    if(wbstate == WBSTATE_TRANSFER & wb_transfer_done)
+      wbstate <= WBSTATE_IDLE;
+
+    if(i_wb_ack)
       wb_word_offset <= wb_word_offset + 1;
-    else 
-      wb_word_offset <= wb_word_offset;
   end
 end
 
 always @(*)begin
-  wb_transfer_done  = 1'b0;
-  if(cstate == CSTATE_MEM_WRITE |
-     cstate == CSTATE_MEM_READ)
-    wb_transfer_done = (wb_word_offset == PARAM_WORD_PER_LINE-1) & i_wb_ack;
+  wb_transfer_done = (wbstate == WBSTATE_TRANSFER) & (wb_word_offset == wb_transfer_size-1) & i_wb_ack;
 end
 
 always @(*)begin
@@ -347,8 +368,7 @@ always @(*)begin
       (i_ahb5_wdata & req_data_mask) | 
       (data_lookup_out[req_way_id] & ~req_data_mask);
   end 
-  else if(cstate == CSTATE_MEM_WRITE_INIT |
-          cstate == CSTATE_MEM_WRITE)begin
+  else if(cstate == CSTATE_MEM_WRITE)begin
     data_update_addr[req_way_id] = (req_addr[10:4] <<2) + wb_word_offset;
     if(i_wb_ack)begin
       data_update_addr[req_way_id] = (req_addr[10:4] <<2) + wb_word_offset + 1;
@@ -379,8 +399,7 @@ always @(*) begin
     meta_update_we[req_way_id]   = 1'b1;
     meta_update_in[req_way_id]   = meta_lookup_out[req_way_id] | dirty_mask;
   end 
-  else if(cstate == CSTATE_MEM_WRITE_INIT |
-          cstate == CSTATE_MEM_WRITE)begin
+  else if(cstate == CSTATE_MEM_WRITE)begin
     meta_update_addr[req_way_id] = req_addr[10:4];
   end
   else if(cstate == CSTATE_UPDATE_META)begin
@@ -399,24 +418,23 @@ always @(*) begin
   o_wb_sel   = 4'b0;
   o_wb_addr  = 32'b0;
   o_wb_wdata = 32'b0;
-  if(cstate == CSTATE_MEM_WRITE)begin
+  if(wbstate == WBSTATE_TRANSFER)begin
     o_wb_cyc   = 1'b1;
     o_wb_stb   = 1'b1;
-    o_wb_we    = 1'b1;
+    o_wb_we    = wb_transfer_we;
     o_wb_bte   = WB_BTE_LINEAR_BURST;
-    o_wb_cti   = (wb_word_offset < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
-    o_wb_sel   = 4'b1111;
-    o_wb_addr  = (meta_update_out[req_way_id] & tag_mask) | req_line | (wb_word_offset << 2);
-    o_wb_wdata = data_update_out[req_way_id];
-  end
-  else if(cstate == CSTATE_MEM_READ)begin
-    o_wb_cyc   = 1'b1;
-    o_wb_stb   = 1'b1;
-    o_wb_we    = 1'b0;
-    o_wb_bte   = WB_BTE_LINEAR_BURST;
-    o_wb_cti   = (wb_word_offset < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
-    o_wb_sel   = 4'b1111;
-    o_wb_addr  = req_tag | req_line | (wb_word_offset << 2);
+    
+    if(wb_transfer_size > 1)begin
+      o_wb_cti   = (wb_word_offset < PARAM_WORD_PER_LINE-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
+      o_wb_sel   = 4'b1111;
+      o_wb_addr  = wb_transfer_base_addr | (wb_word_offset << 2);
+      o_wb_wdata = data_update_out[req_way_id];
+    end else begin
+      o_wb_cti   = WB_CTI_CLASSIC_CYCLE;
+      o_wb_sel   = {req_data_mask[24], req_data_mask[16], req_data_mask[8], req_data_mask[0]};
+      o_wb_addr  = wb_transfer_base_addr;
+      o_wb_wdata = i_ahb5_wdata;
+    end
   end
 end
 
