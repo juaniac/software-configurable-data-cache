@@ -61,14 +61,14 @@ always @(posedge i_clk or negedge i_rst_n) begin
     case (cstate)
       CSTATE_ADDR: 
         cstate <= (i_ahb5_trans[1]) ? CSTATE_CACHE :
-                                     CSTATE_ADDR;
+                                      CSTATE_ADDR;
       CSTATE_CACHE:
         cstate <= (hit & ~i_ahb5_trans[1]) ? CSTATE_ADDR :
-                 (hit & i_ahb5_trans[1])  ? CSTATE_CACHE :
-                                            CSTATE_LOOKUP;
+                  (hit & i_ahb5_trans[1])  ? CSTATE_CACHE :
+                                             CSTATE_LOOKUP;
       CSTATE_LOOKUP: 
         cstate <= (miss_dirty) ? CSTATE_MEM_WRITE_INIT :
-                                CSTATE_MEM_READ; 
+                                 CSTATE_MEM_READ; 
       CSTATE_MEM_WRITE_INIT:
         cstate <= CSTATE_MEM_WRITE;
       CSTATE_MEM_WRITE:
@@ -153,9 +153,9 @@ generate
 endgenerate
 
 wire [31:0] tag_mask, line_mask, word_mask, dirty_mask, valid_mask;
-assign tag_mask = {{19{1'b1}}, {9{1'b0}}, {4{1'b0}}};
-assign line_mask = {{19{1'b0}}, {9{1'b1}}, {4{1'b0}}};
-assign word_mask = {{19{1'b0}}, {9{1'b0}}, {2{1'b1}}, {2{1'b0}}};
+assign tag_mask   = {{19{1'b1}}, {9{1'b0}}, {4{1'b0}}};
+assign line_mask  = {{19{1'b0}}, {9{1'b1}}, {4{1'b0}}};
+assign word_mask  = {{19{1'b0}}, {9{1'b0}}, {2{1'b1}}, {2{1'b0}}};
 assign dirty_mask = 32'b10;  
 assign valid_mask = 32'b1;
 
@@ -315,6 +315,8 @@ always @(posedge i_clk) begin
       wb_word_offset <= 5'b0;
     else if(i_wb_ack)
       wb_word_offset <= wb_word_offset + 1;
+    else 
+      wb_word_offset <= wb_word_offset;
   end
 end
 
@@ -345,10 +347,8 @@ always @(*)begin
       (i_ahb5_wdata & req_data_mask) | 
       (data_lookup_out[req_way_id] & ~req_data_mask);
   end 
-  else if(cstate == CSTATE_MEM_WRITE_INIT)begin
-    data_update_addr[req_way_id] = (req_addr[10:4] <<2);
-  end 
-  else if(cstate == CSTATE_MEM_WRITE)begin
+  else if(cstate == CSTATE_MEM_WRITE_INIT |
+          cstate == CSTATE_MEM_WRITE)begin
     data_update_addr[req_way_id] = (req_addr[10:4] <<2) + wb_word_offset;
     if(i_wb_ack)begin
       data_update_addr[req_way_id] = (req_addr[10:4] <<2) + wb_word_offset + 1;
