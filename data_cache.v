@@ -46,9 +46,9 @@ localparam CSTATE_UPDATE_META         = 4'b0110;
 localparam CSTATE_REDO_ADDR           = 4'b0111;
 localparam CSTATE_MEM_ERR             = 4'b1000;
 localparam CSTATE_CLEANUP_INIT        = 4'b1001;
-localparam CSTATE_CLEANUP_LOOKUP      = 4'b1001;
-localparam CSTATE_CLEANUP_WRITEBACK   = 4'b1010;
-localparam CSTATE_CLEANUP_UPDATE_META = 4'b1010;
+localparam CSTATE_CLEANUP_LOOKUP      = 4'b1010;
+localparam CSTATE_CLEANUP_WRITEBACK   = 4'b1011;
+localparam CSTATE_CLEANUP_UPDATE_META = 4'b1100;
 
 reg hit, miss_dirty, wb_transfer_done, cleanup_pending, cleanup_dirty, cleanup_done; 
 always @(posedge i_clk or negedge i_rst_n) begin
@@ -275,8 +275,8 @@ generate
                   cstate == CSTATE_CLEANUP_LOOKUP |
                   cstate == CSTATE_CLEANUP_WRITEBACK |
                   cstate == CSTATE_CLEANUP_UPDATE_META)begin
-        meta_lookup_addr[i] = cleanup_line + (cstate == CSTATE_CLEANUP_LOOKUP) ? 1'b1 : 1'b0; 
-        data_lookup_addr[i] = ((cleanup_line + (cstate == CSTATE_CLEANUP_LOOKUP) ? 1'b1 : 1'b0) << 2);
+        meta_lookup_addr[i] = cleanup_line + ((cstate == CSTATE_CLEANUP_LOOKUP) ? 1'b1 : 1'b0); 
+        data_lookup_addr[i] = ((cleanup_line + ((cstate == CSTATE_CLEANUP_LOOKUP) ? 1'b1 : 1'b0)) << 2);
       end else begin
         meta_lookup_addr[i] = req_addr[10:4]; 
         data_lookup_addr[i] = req_addr[10:2];
