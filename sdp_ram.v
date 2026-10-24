@@ -1,15 +1,21 @@
-module sdp_ram # (
-  parameter bitwidth = 32,
-  parameter nrOfEntries = 512
-)(
+module sdp_ram (
   input wire clkA, clkB, 
   input wire we,
-  input wire [$clog2(nrOfEntries)-1:0] addrA, addrB,
-  input wire [bitwidth-1:0] dataIn,
-  output reg [bitwidth-1:0] dataOutA, dataOutB
+  input wire [8:0] addrA, addrB,
+  input wire [31:0] dataIn,
+  output reg [31:0] dataOutA, dataOutB
 );
 
-reg [bitwidth-1:0] mem[$clog2(nrOfEntries)-1 : 0];
+reg [31:0] mem[511:0];
+
+integer i;
+initial begin
+  dataOutA = 32'b0;
+  dataOutB = 32'b0;
+
+  for (i = 0; i < 512; i=i+1)
+    mem[i] = 32'b0;
+end
 
 always @(posedge clkA) begin
   dataOutA <= mem[addrA];
