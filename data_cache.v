@@ -3,9 +3,9 @@ module data_cache (
   input  wire          i_rst_n,
 
   // ahb5 interface
-  input  wire [31:0]   i_ahb5_addr,    
+  input  wire [31:0]   i_ahb5_addr,
   input  wire          i_ahb5_we,
-  input  wire [1:0]    i_ahb5_trans,    
+  input  wire [1:0]    i_ahb5_trans,
   input  wire [2:0]    i_ahb5_size,
   input  wire [31:0]   i_ahb5_wdata,
   output reg  [31:0]   o_ahb5_rdata,
@@ -62,22 +62,26 @@ reg hit, miss_dirty, wb_transfer_done, flush_pending, flush_dirty, flush_done;
 wire cacheable;
 assign cacheable = i_cache_on & ~i_ahb5_addr[31];
 
+wire bypass_idle;
+assign bypass_idle = (bpstate == BPSTATE_ADDR);
+
+wire cache_transfer;
+assign cache_transfer = cacheable & i_ahb5_trans[1] & bypass_idle;
+
 always @(posedge i_clk or negedge i_rst_n) begin
   if(~i_rst_n) begin
     cstate <= CSTATE_ADDR;
   end else begin
     case (cstate)
       CSTATE_ADDR: 
-        cstate <= (flush_pending)               ? CSTATE_FLUSH_INIT :
-                  (cacheable & i_ahb5_trans[1] &
-                  (bpstate == BPSTATE_ADDR))    ? CSTATE_CACHE :
-                                                  CSTATE_ADDR;
+        cstate <= (flush_pending)  ? CSTATE_FLUSH_INIT :
+                  (cache_transfer) ? CSTATE_CACHE :
+                                     CSTATE_ADDR;
       CSTATE_CACHE:
-        cstate <= (~hit)                        ? CSTATE_LOOKUP :
-                  (flush_pending)               ? CSTATE_FLUSH_INIT :
-                  (cacheable & i_ahb5_trans[1] &
-                  (bpstate == BPSTATE_ADDR)) ? CSTATE_CACHE :
-                                                  CSTATE_ADDR;
+        cstate <= (~hit)           ? CSTATE_LOOKUP :
+                  (flush_pending)  ? CSTATE_FLUSH_INIT :
+                  (cache_transfer) ? CSTATE_CACHE :
+                                     CSTATE_ADDR;
       CSTATE_LOOKUP: 
         cstate <= (miss_dirty) ? CSTATE_MEM_EVICT :
                                  CSTATE_MEM_READ; 
@@ -100,10 +104,9 @@ always @(posedge i_clk or negedge i_rst_n) begin
       CSTATE_FLUSH_INIT:
         cstate <= CSTATE_FLUSH_LOOKUP;
       CSTATE_FLUSH_LOOKUP:
-        cstate <= (flush_dirty &
-                  (bpstate == BPSTATE_ADDR)) ? CSTATE_FLUSH_WRITEBACK :
-                               (flush_done)  ? CSTATE_ADDR :
-                                               CSTATE_FLUSH_LOOKUP;
+        cstate <= (flush_dirty & bypass_idle) ? CSTATE_FLUSH_WRITEBACK :
+                  (flush_done)                ? CSTATE_ADDR :
+                                                CSTATE_FLUSH_LOOKUP;
       CSTATE_FLUSH_WRITEBACK:
         cstate <= (i_wb_err)         ? CSTATE_FLUSH_INIT : 
                   (wb_transfer_done) ? CSTATE_FLUSH_UPDATE_META :
@@ -293,11 +296,13 @@ generate
         meta_lookup_addr[i] = i_ahb5_addr[10:4]; 
         data_lookup_addr[i] = i_ahb5_addr[10:2];
       end else if(cstate == CSTATE_FLUSH_INIT |
-                  cstate == CSTATE_FLUSH_LOOKUP |
                   cstate == CSTATE_FLUSH_WRITEBACK |
                   cstate == CSTATE_FLUSH_UPDATE_META)begin
-        meta_lookup_addr[i] = flush_line + ((cstate == CSTATE_FLUSH_LOOKUP) ? 1'b1 : 1'b0); 
-        data_lookup_addr[i] = {(flush_line + ((cstate == CSTATE_FLUSH_LOOKUP) ? 1'b1 : 1'b0)), 2'b00};
+        meta_lookup_addr[i] = flush_line; 
+        data_lookup_addr[i] = {flush_line 2'b00};
+      end else if(cstate == CSTATE_FLUSH_LOOKUP)begin
+        meta_lookup_addr[i] = flush_line + 1; 
+        data_lookup_addr[i] = {flush_line + 1, 2'b00};
       end else begin
         meta_lookup_addr[i] = req_addr[10:4]; 
         data_lookup_addr[i] = req_addr[10:2];
@@ -312,7 +317,7 @@ assign bypass_transfer =
   i_ahb5_trans[1] &
     (cstate == CSTATE_ADDR | 
      cstate == CSTATE_FLUSH_INIT |
-      (cstate == CSTATE_FLUSH_LOOKUP & ~flush_dirty));
+    (cstate == CSTATE_FLUSH_LOOKUP & ~flush_dirty));
 
 always @(posedge i_clk or negedge i_rst_n) begin
   if(~i_rst_n)
@@ -489,6 +494,7 @@ always @(posedge i_clk or negedge i_rst_n) begin
   if(~i_rst_n)begin
     flush_pending <= 1'b0;
     flush_line    <= 9'b0;
+    cache_was_on  <= 1'b0;
   end else begin 
     cache_was_on <= i_cache_on;
     if(cstate == CSTATE_FLUSH_LOOKUP & ~flush_dirty)
