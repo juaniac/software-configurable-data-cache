@@ -91,7 +91,8 @@ module tb_data_cache;
     .i_wb_rdata  (wb_rdata),
     .i_wb_ack    (wb_ack),
     .i_wb_err    (wb_err),
-    .i_cleanup   (cleanup)
+    .i_flush     (cleanup),
+    .i_cache_on  (1'b1)
   );
 
   initial begin
@@ -594,7 +595,7 @@ end
       for (cycles = 0; cycles < MAX_CLEANUP_CYCLES; cycles = cycles + 1) begin
         // Avoid mistaking the initial, not-yet-latched cleanup request for done.
         if ((cycles > 20) && (dut.cstate === ST_ADDR) &&
-            (dut.cleanup_pending === 1'b0)) begin
+            (dut.flush_pending === 1'b0)) begin
           success = 1'b1;
           disable request_cleanup_body;
         end
@@ -820,7 +821,7 @@ end
             "cleanup writes back at least one four-word dirty line");
       check(read_backing_word(address) === expected_after_store,
             "cleanup persisted dirty word");
-      check(dut.cleanup_pending === 1'b0,
+      check(dut.flush_pending === 1'b0,
             "cleanup_pending is cleared when cleanup completes");
     end
   endtask

@@ -36,6 +36,12 @@ localparam WB_CTI_CLASSIC_CYCLE   = 3'b000;
 localparam WB_CTI_INC_BURST_CYCLE = 3'b010;
 localparam WB_CTI_END_BURST_CYCLE = 3'b111;
 
+reg [1:0] bpstate;
+localparam BPSTATE_ADDR  = 2'b00;
+localparam BPSTATE_READ  = 2'b01;
+localparam BPSTATE_WRITE = 2'b10;
+localparam BPSTATE_ERR   = 2'b11;
+
 reg [3:0] cstate;
 localparam CSTATE_ADDR                = 4'b0000;
 localparam CSTATE_CACHE               = 4'b0001;
@@ -63,17 +69,18 @@ always @(posedge i_clk or negedge i_rst_n) begin
     case (cstate)
       CSTATE_ADDR: 
         cstate <= (flush_pending)               ? CSTATE_FLUSH_INIT :
-                  (cacheable & i_ahb5_trans[1]) ? CSTATE_CACHE :
+                  (cacheable & i_ahb5_trans[1] &
+                  (bpstate == BPSTATE_ADDR))    ? CSTATE_CACHE :
                                                   CSTATE_ADDR;
       CSTATE_CACHE:
         cstate <= (~hit)                        ? CSTATE_LOOKUP :
                   (flush_pending)               ? CSTATE_FLUSH_INIT :
-                  (cacheable & i_ahb5_trans[1]) ? CSTATE_CACHE :
+                  (cacheable & i_ahb5_trans[1] &
+                  (bpstate == BPSTATE_ADDR)) ? CSTATE_CACHE :
                                                   CSTATE_ADDR;
       CSTATE_LOOKUP: 
-        cstate <= (bpstate != BPSTATE_ADDR) ? CSTATE_LOOKUP :
-                  (miss_dirty)              ? CSTATE_MEM_EVICT :
-                                              CSTATE_MEM_READ; 
+        cstate <= (miss_dirty) ? CSTATE_MEM_EVICT :
+                                 CSTATE_MEM_READ; 
       CSTATE_MEM_EVICT:
         cstate <= (i_wb_err)         ? CSTATE_MEM_ERR : 
                   (wb_transfer_done) ? CSTATE_MEM_WAIT :
@@ -93,9 +100,10 @@ always @(posedge i_clk or negedge i_rst_n) begin
       CSTATE_FLUSH_INIT:
         cstate <= CSTATE_FLUSH_LOOKUP;
       CSTATE_FLUSH_LOOKUP:
-        cstate <= (flush_dirty) ? CSTATE_FLUSH_WRITEBACK :
-                  (flush_done)  ? CSTATE_ADDR :
-                                  CSTATE_FLUSH_LOOKUP;
+        cstate <= (flush_dirty &
+                  (bpstate == BPSTATE_ADDR)) ? CSTATE_FLUSH_WRITEBACK :
+                               (flush_done)  ? CSTATE_ADDR :
+                                               CSTATE_FLUSH_LOOKUP;
       CSTATE_FLUSH_WRITEBACK:
         cstate <= (i_wb_err)         ? CSTATE_FLUSH_INIT : 
                   (wb_transfer_done) ? CSTATE_FLUSH_UPDATE_META :
@@ -184,14 +192,8 @@ always @(posedge i_clk or negedge i_rst_n)begin
     req_addr <= 32'b0;
     req_size <= 3'b0;
     req_we   <= 1'b0;
-  end else if(
-    i_cache_on & 
-    (cstate == CSTATE_ADDR |
-    (cstate == CSTATE_CACHE & hit))
-    |
-    ~i_cache_on &
-    (bpstate == BPSTATE_ADDR)
-  ) begin
+  end else if(cstate == CSTATE_ADDR |
+              cstate == CSTATE_CACHE & hit) begin
     req_addr <= i_ahb5_addr;
     req_size <= i_ahb5_size;
     req_we   <= i_ahb5_we;
@@ -304,6 +306,38 @@ generate
   end 
 endgenerate
 
+wire bypass_transfer;
+assign bypass_transfer = 
+  ~cacheable & 
+  i_ahb5_trans[1] &
+    (cstate == CSTATE_ADDR | 
+     cstate == CSTATE_FLUSH_INIT |
+      (cstate == CSTATE_FLUSH_LOOKUP & ~flush_dirty));
+
+always @(posedge i_clk or negedge i_rst_n) begin
+  if(~i_rst_n)
+    bpstate <= BPSTATE_ADDR;
+  else begin
+    case (bpstate)
+      BPSTATE_ADDR: 
+        bpstate <= (bypass_transfer & ~i_ahb5_we) ? BPSTATE_READ :
+                   (bypass_transfer & i_ahb5_we)  ? BPSTATE_WRITE :
+                                                    BPSTATE_ADDR; 
+      BPSTATE_READ:
+        bpstate <= (i_wb_err)         ? BPSTATE_ERR :
+                   (wb_transfer_done) ? BPSTATE_ADDR :
+                                        BPSTATE_READ; 
+      BPSTATE_WRITE:
+        bpstate <= (i_wb_err)         ? BPSTATE_ERR :
+                   (wb_transfer_done) ? BPSTATE_ADDR :
+                                        BPSTATE_WRITE; 
+      BPSTATE_ERR: 
+        bpstate <= BPSTATE_ADDR;
+      default: bpstate <= BPSTATE_ADDR;
+    endcase
+  end
+end
+
 reg [1:0] wbstate;
 localparam WBSTATE_IDLE       = 2'b00;
 localparam WBSTATE_WDATA_WAIT = 2'b01;
@@ -337,11 +371,18 @@ always @(posedge i_clk or negedge i_rst_n)begin
       wb_transfer_base_addr <= req_tag | req_line;
       wb_word_offset        <= 4'b0;
     end 
-    else if(cstate == CSTATE_FLUSH_LOOKUP & flush_dirty)begin
+    else if(cstate == CSTATE_FLUSH_LOOKUP & flush_dirty & bpstate == BPSTATE_ADDR)begin
       wbstate               <= WBSTATE_WDATA_WAIT;
       wb_transfer_we        <= 1'b1;
       wb_transfer_size      <= 4;
       wb_transfer_base_addr <= lookup_tag[flush_dirty_way_id] | {flush_line, 4'b0000};
+      wb_word_offset        <= 4'b0;
+    end
+    else if(bpstate == BPSTATE_ADDR & bypass_transfer)begin
+      wbstate               <= WBSTATE_TRANSFER;
+      wb_transfer_we        <= i_ahb5_we;
+      wb_transfer_size      <= 1;
+      wb_transfer_base_addr <= {i_ahb5_addr[31:2], 2'b00};
       wb_word_offset        <= 4'b0;
     end
 
@@ -477,44 +518,6 @@ always @(*) begin
   flush_done = (cstate == CSTATE_FLUSH_LOOKUP) & (flush_line == (128-1)) & ~flush_dirty;
 end
 
-reg [1:0] bpstate;
-localparam BPSTATE_ADDR  = 2'b00;
-localparam BPSTATE_READ  = 2'b01;
-localparam BPSTATE_WRITE = 2'b10;
-localparam BPSTATE_ERR   = 2'b11;
-
-wire bridge_transfer;
-assign bridge_transfer = 
-  (~cacheable | ~i_cache_on) & 
-  i_ahb5_trans[1] &
-    (cstate == CSTATE_ADDR | 
-     cstate == CSTATE_FLUSH_INIT |
-      (cstate == CSTATE_FLUSH_LOOKUP & ~flush_dirty));
-
-always @(posedge i_clk or negedge i_rst_n) begin
-  if(~i_rst_n)
-    bpstate <= BPSTATE_ADDR;
-  else begin
-    case (bpstate)
-      BPSTATE_ADDR: 
-        bpstate <= (bridge_transfer & ~i_ahb5_we) ? BPSTATE_READ :
-                   (bridge_transfer & i_ahb5_we)  ? BPSTATE_WRITE :
-                                                    BPSTATE_ADDR; 
-      BPSTATE_READ:
-        bpstate <= (i_wb_err)         ? BPSTATE_ERR :
-                   (wb_transfer_done) ? BPSTATE_ADDR :
-                                        BPSTATE_READ; 
-      BPSTATE_WRITE:
-        bpstate <= (i_wb_err)         ? BPSTATE_ERR :
-                   (wb_transfer_done) ? BPSTATE_ADDR :
-                                        BPSTATE_WRITE; 
-      BPSTATE_ERR: 
-        bpstate <= BPSTATE_ADDR
-      default: bpstate <= BPSTATE_ADDR;
-    endcase
-  end
-end
-
 always @(*) begin
   o_wb_cyc   = 1'b0;
   o_wb_stb   = 1'b0;
@@ -547,14 +550,20 @@ always @(*) begin
 end
 
 always @(*) begin
-  o_ahb5_rdata = 32'b0;
   o_ahb5_ready = 1'b0;
-  if(cstate == CSTATE_ADDR |
-    (cstate == CSTATE_CACHE & hit))begin
+  if((bpstate == BPSTATE_ADDR) &
+     (cacheable & cstate == CSTATE_ADDR) |
+     (cstate == CSTATE_CACHE & hit) |
+     (~cacheable))begin
     o_ahb5_ready = 1'b1;
   end
+
+  o_ahb5_rdata = 32'b0;
   if(cstate == CSTATE_CACHE & hit & ~req_we)begin
     o_ahb5_rdata = data_lookup_out[hit_way_id] & req_data_mask;
+  end
+  else if(bpstate == BPSTATE_READ & wb_transfer_done)begin
+    o_ahb5_rdata = i_wb_rdata;
   end
 end
 
