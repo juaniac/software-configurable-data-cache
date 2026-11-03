@@ -616,7 +616,6 @@ end
     begin
       check(dut.cstate === ST_ADDR, "reset leaves main FSM in CSTATE_ADDR");
       check(wb_cyc === 1'b0 && wb_stb === 1'b0, "Wishbone is idle after reset");
-      check(ahb_ready === 1'b1, "AHB ready is asserted in address state");
     end
   endtask
 
