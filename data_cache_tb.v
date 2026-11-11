@@ -7,7 +7,7 @@
 //   * AHB-like requests use i_ahb5_trans[1] == 1 for a valid transfer.
 //   * A cache line contains four 32-bit words (16 bytes).
 //   * The apparent address layout is {tag[18:0], bank[1:0], line[6:0], byte[3:0]}.
-//   * The DUT's internal FSM registers are named cache_state and wb_state, with the
+//   * The DUT's internal FSM registers are named req_state and wb_state, with the
 //     encodings copied below. Update the coverage hooks if those names change.
 //   * sdp_ram is a synchronous RAM. Prefer your real sdp_ram model/IP when
 //     possible; sdp_ram_model.v is provided as an optional simulation model.
@@ -34,10 +34,6 @@ module tb_data_cache;
   localparam [3:0] ST_UPDATE_META          = 4'h6;
   localparam [3:0] ST_REDO_ADDR            = 4'h7;
   localparam [3:0] ST_MEM_ERR              = 4'h8;
-  localparam [3:0] ST_CLEANUP_INIT         = 4'h9;
-  localparam [3:0] ST_CLEANUP_LOOKUP       = 4'hA;
-  localparam [3:0] ST_CLEANUP_WRITEBACK    = 4'hB;
-  localparam [3:0] ST_CLEANUP_UPDATE_META  = 4'hC;
 
   localparam [1:0] WB_ST_IDLE       = 2'h0;
   localparam [1:0] WB_ST_WDATA_WAIT = 2'h1;
@@ -352,8 +348,8 @@ end
 
   always @(posedge clk) begin
     if (rst_n) begin
-      if ((^dut.cache_state) !== 1'bx)
-        main_state_seen[dut.cache_state] = 1'b1;
+      if ((^dut.req_state) !== 1'bx)
+        main_state_seen[dut.req_state] = 1'b1;
       if ((^dut.wb_state) !== 1'bx)
         wb_state_seen[dut.wb_state] = 1'b1;
     end
@@ -384,11 +380,11 @@ end
     begin : wait_for_addr_state_body
       success = 1'b0;
       cycles = 0;
-      while ((dut.cache_state !== ST_ADDR) && (cycles < MAX_WAIT_CYCLES)) begin
+      while ((dut.req_state !== ST_ADDR) && (cycles < MAX_WAIT_CYCLES)) begin
         @(negedge clk);
         cycles = cycles + 1;
       end
-      if (dut.cache_state === ST_ADDR)
+      if (dut.req_state === ST_ADDR)
         success = 1'b1;
       else
         check(1'b0, "Timed out waiting for CACHE_STATE_ADDR before AHB request");
@@ -436,7 +432,7 @@ end
       for (cycles = 0; cycles < MAX_WAIT_CYCLES; cycles = cycles + 1) begin
         // Check before waiting: a cache hit may be ready on the first negedge
         // after ahb_start_request returns.
-        if ((dut.cache_state === ST_CACHE) && (dut.req_hit === 1'b1) && (ahb_ready === 1'b1)) begin
+        if ((dut.req_state === ST_CACHE) && (dut.req_hit === 1'b1) && (ahb_ready === 1'b1)) begin
           read_data = ahb_rdata;
           @(posedge clk); // let the hit/write complete
           @(negedge clk);
@@ -567,7 +563,7 @@ end
         disable expect_wishbone_error_body;
 
       for (cycles = 0; cycles < MAX_WAIT_CYCLES; cycles = cycles + 1) begin
-        if (dut.cache_state === ST_MEM_ERR) begin
+        if (dut.req_state === ST_MEM_ERR) begin
           check(ahb_resp === 1'b1, "AHB response indicates the Wishbone error for 1 cycle");
           @(posedge clk);
           @(negedge clk);
@@ -594,7 +590,7 @@ end
 
       for (cycles = 0; cycles < MAX_CLEANUP_CYCLES; cycles = cycles + 1) begin
         // Avoid mistaking the initial, not-yet-latched cleanup request for done.
-        if ((cycles > 20) && (dut.cache_state === ST_ADDR) &&
+        if ((cycles > 20) && (dut.req_state === ST_ADDR) &&
             (dut.flush_pending === 1'b0)) begin
           success = 1'b1;
           disable request_cleanup_body;
@@ -614,7 +610,7 @@ end
 
   task test_reset_and_idle;
     begin
-      check(dut.cache_state === ST_ADDR, "reset leaves main FSM in CACHE_STATE_ADDR");
+      check(dut.req_state === ST_ADDR, "reset leaves main FSM in CACHE_STATE_ADDR");
       check(wb_cyc === 1'b0 && wb_stb === 1'b0, "Wishbone is idle after reset");
     end
   endtask
@@ -794,7 +790,7 @@ end
       check(ok, "injected Wishbone error reaches CACHE_STATE_MEM_ERR");
       check(wb_error_count == before_errors + 1,
             "Wishbone slave model injected exactly one error");
-      check(dut.cache_state === ST_ADDR,
+      check(dut.req_state === ST_ADDR,
             "controller returns to CACHE_STATE_ADDR after memory error");
     end
   endtask
@@ -860,10 +856,6 @@ end
       report_main_state(ST_UPDATE_META,          "CACHE_STATE_UPDATE_META");
       report_main_state(ST_REDO_ADDR,            "CACHE_STATE_REDO_ADDR");
       report_main_state(ST_MEM_ERR,              "CACHE_STATE_MEM_ERR");
-      report_main_state(ST_CLEANUP_INIT,         "CACHE_STATE_CLEANUP_INIT");
-      report_main_state(ST_CLEANUP_LOOKUP,       "CACHE_STATE_CLEANUP_LOOKUP");
-      report_main_state(ST_CLEANUP_WRITEBACK,    "CACHE_STATE_CLEANUP_WRITEBACK");
-      report_main_state(ST_CLEANUP_UPDATE_META,  "CACHE_STATE_CLEANUP_UPDATE_META");
 
       $display("\n=== WISHBONE FSM STATE COVERAGE ===");
       report_wb_state(WB_ST_IDLE,       "WB_STATE_IDLE");
