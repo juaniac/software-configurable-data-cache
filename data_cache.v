@@ -31,18 +31,18 @@ module data_cache (
 );
 
 reg [3:0]  req_state;
-localparam REQ_STATE_ADDR                = 4'b0000;
-localparam REQ_STATE_CACHE               = 4'b0001;
-localparam REQ_STATE_LOOKUP              = 4'b0010;
-localparam REQ_STATE_CACHELINE_WRITE     = 4'b0011;
-localparam REQ_STATE_BUS_WAIT            = 4'b0100;
-localparam REQ_STATE_CACHELINE_READ      = 4'b0101;
-localparam REQ_STATE_UPDATE_META         = 4'b0110;
-localparam REQ_STATE_REDO_ADDR           = 4'b0111;
-localparam REQ_STATE_BUS_ERR             = 4'b1000;
-localparam REQ_STATE_STALL               = 4'b1001;
-localparam REQ_STATE_BYPASS_TRANSFER     = 4'b1010;
-localparam REQ_STATE_BYPASS_RESPONSE     = 4'b1011;
+localparam REQ_STATE_ADDR            = 4'b0000;
+localparam REQ_STATE_CACHE           = 4'b0001;
+localparam REQ_STATE_LOOKUP          = 4'b0010;
+localparam REQ_STATE_EVICT           = 4'b0011;
+localparam REQ_STATE_BUS_WAIT        = 4'b0100;
+localparam REQ_STATE_REFILL          = 4'b0101;
+localparam REQ_STATE_UPDATE_META     = 4'b0110;
+localparam REQ_STATE_REDO_ADDR       = 4'b0111;
+localparam REQ_STATE_BUS_ERR         = 4'b1000;
+localparam REQ_STATE_STALL           = 4'b1001;
+localparam REQ_STATE_BYPASS_TRANSFER = 4'b1010;
+localparam REQ_STATE_BYPASS_RESPONSE = 4'b1011;
 
 reg req_pending_transfer;
 reg req_cacheable_addr;
@@ -168,20 +168,20 @@ always @(posedge i_clk or negedge i_rst_n) begin
                      (req_stall_start)  ? REQ_STATE_STALL :
                                           REQ_STATE_ADDR;
       REQ_STATE_LOOKUP: 
-        req_state <= (req_miss_dirty) ? REQ_STATE_CACHELINE_WRITE :
-                                        REQ_STATE_CACHELINE_READ; 
-      REQ_STATE_CACHELINE_WRITE:
+        req_state <= (req_miss_dirty) ? REQ_STATE_EVICT :
+                                        REQ_STATE_REFILL;     
+      REQ_STATE_EVICT:
         req_state <= (wb_bus_err)       ? REQ_STATE_BUS_ERR : 
                      (wb_transfer_done) ? REQ_STATE_BUS_WAIT :
-                                          REQ_STATE_CACHELINE_WRITE;
+                                          REQ_STATE_EVICT;
       REQ_STATE_BUS_ERR :
         req_state <= REQ_STATE_ADDR;
       REQ_STATE_BUS_WAIT:
-        req_state <= REQ_STATE_CACHELINE_READ;
-      REQ_STATE_CACHELINE_READ:
+        req_state <= REQ_STATE_REFILL;
+      REQ_STATE_REFILL:
         req_state <= (wb_bus_err)       ? REQ_STATE_BUS_ERR : 
                      (wb_transfer_done) ? REQ_STATE_UPDATE_META :
-                                          REQ_STATE_CACHELINE_READ;
+                                          REQ_STATE_REFILL;
       REQ_STATE_UPDATE_META:
         req_state <= REQ_STATE_REDO_ADDR;
       REQ_STATE_REDO_ADDR:
@@ -311,8 +311,8 @@ end
 always @(*) begin
   req_miss_mem_id = 2'b00;
   if((req_state == REQ_STATE_LOOKUP) | 
-     (req_state == REQ_STATE_CACHELINE_WRITE) |
-     (req_state == REQ_STATE_CACHELINE_READ) |
+     (req_state == REQ_STATE_EVICT)  |
+     (req_state == REQ_STATE_REFILL) |
      (req_state == REQ_STATE_UPDATE_META)
     )begin
       req_miss_mem_id = req_addr[12:11];
@@ -322,7 +322,7 @@ end
 always @(*) begin
   req_miss_dirty = 1'b0;
   if(req_state == REQ_STATE_LOOKUP) begin
-    req_miss_dirty = lookup_dirty[mem_id];
+    req_miss_dirty = lookup_dirty[req_miss_mem_id];
   end
 end
 
@@ -331,8 +331,8 @@ always @(*) begin
   if(req_state == REQ_STATE_CACHE)
     mem_id = req_hit_mem_id;
   else if((req_state == REQ_STATE_LOOKUP) | 
-          (req_state == REQ_STATE_CACHELINE_WRITE) |
-          (req_state == REQ_STATE_CACHELINE_READ) |
+          (req_state == REQ_STATE_EVICT) |
+          (req_state == REQ_STATE_REFILL)     |
           (req_state == REQ_STATE_UPDATE_META))
     mem_id = req_miss_mem_id;
   else if((flush_state == FLUSH_STATE_LOOKUP) |
@@ -403,14 +403,14 @@ always @(posedge i_clk or negedge i_rst_n)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= i_ahb5_we;
         wb_transfer_size      <= 1;
-        wb_transfer_base_addr <= {i_ahb5_addr[31:2], 2'b00};
+        wb_transfer_base_addr <= i_ahb5_addr & 32'hFFFFFFFC;
         wb_word_offset        <= 4'b0;
       end
       else if((req_state == REQ_STATE_STALL) & req_bypass_start)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= req_we;
         wb_transfer_size      <= 1;
-        wb_transfer_base_addr <= {req_addr[31:2], 2'b00};
+        wb_transfer_base_addr <= req_addr & 32'hFFFFFFFC;
         wb_word_offset        <= 4'b0;
       end
       else if((flush_state == FLUSH_STATE_LOOKUP) & flush_writeback)begin
@@ -458,13 +458,13 @@ always @(*)begin
       (i_ahb5_wdata & req_data_mask) | 
       (data_lookup_out[mem_id] & ~req_data_mask);
   end 
-  else if(req_state == REQ_STATE_CACHELINE_WRITE)begin
+  else if(req_state == REQ_STATE_EVICT)begin
     data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset;
     if(i_wb_ack)begin
       data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset + 1;
     end
   end 
-  else if((req_state == REQ_STATE_CACHELINE_READ) & i_wb_ack)begin
+  else if((req_state == REQ_STATE_REFILL)     & i_wb_ack)begin
     data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset;
     data_update_we[mem_id]   = 1'b1;
     data_update_in[mem_id]   = i_wb_rdata;
@@ -606,7 +606,7 @@ always @(*) begin
     o_wb_bte   = WB_BTE_LINEAR_BURST;
     
     if(wb_transfer_size > 1)begin
-      o_wb_cti   = (wb_word_offset < 4-1) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
+      o_wb_cti   = (wb_word_offset < (wb_transfer_size-1)) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
       o_wb_sel   = 4'b1111;
       o_wb_addr  = wb_transfer_base_addr | {wb_word_offset, 2'b00};
       if(wb_transfer_we)
