@@ -30,6 +30,32 @@ module data_cache (
   input wire           i_cache_on
 );
 
+wire [4:0] conf_nb_tag_bits;
+wire [4:0] conf_nb_mem_id_bits;
+wire [4:0] conf_nb_line_bits;
+wire [4:0] conf_nb_word_bits;
+wire [4:0] conf_nb_byte_bits;
+
+reg [31:0] ahb5_addr_tag;
+reg [31:0] ahb5_addr_mem_id;
+reg [31:0] ahb5_addr_line;
+reg [31:0] ahb5_addr_word;
+reg [31:0] ahb5_addr_byte;
+reg  [3:0] ahb5_byte_sel;
+
+`define WORD_ADDR(addr) ((addr) >> (conf_nb_byte_bits))
+`define LINE_ADDR(addr) ((addr) >> (conf_nb_word_bits + conf_nb_byte_bits))
+`define MEM_ID_ADDR(addr) ((addr) >> (conf_nb_line_bits + conf_nb_word_bits + conf_nb_byte_bits))
+
+reg  [31:0] addr_tag_mask;
+reg  [31:0] addr_mem_id_mask;
+reg  [31:0] addr_line_mask;
+reg  [31:0] addr_word_mask;
+reg  [31:0] addr_byte_mask;
+
+wire  [31:0] meta_dirty_mask; 
+wire  [31:0] meta_valid_mask;
+
 reg [3:0]  req_state;
 localparam REQ_STATE_ADDR            = 4'b0000;
 localparam REQ_STATE_CACHE           = 4'b0001;
@@ -72,24 +98,19 @@ reg         data_fwd_valid   [3:0];
 reg  [31:0] data_fwd_data    [3:0];
 wire [31:0] data_lookup_out_ [3:0];
 
-wire  [31:0] mask_tag;
-wire  [31:0] mask_line;
-wire  [31:0] mask_word; 
-wire  [31:0] mask_dirty; 
-wire  [31:0] mask_valid;
-
 reg [31:0] lookup_tag   [3:0];
 reg        lookup_dirty [3:0];
 reg        lookup_valid [3:0];
 reg        lookup_hit   [3:0];
 
 reg [31:0] req_addr;
+reg [31:0] req_addr_tag;
+reg [31:0] req_addr_mem_id;
+reg [31:0] req_addr_line;
+reg [31:0] req_addr_word;
 reg [2:0]  req_size;
 reg        req_we;
 reg [31:0] req_rdata;
-reg [31:0] req_tag;
-reg [31:0] req_line;
-reg [31:0] req_word;
 reg [31:0] req_data_mask;
 reg        req_hit;
 reg [1:0]  req_hit_mem_id;
@@ -121,6 +142,7 @@ localparam WB_STATE_TRANSFER   = 2'b10;
 
 reg        wb_transfer_we;
 reg  [5:0] wb_transfer_size;
+reg  [3:0] wb_byte_sel;
 reg [31:0] wb_transfer_base_addr;
 reg  [4:0] wb_word_offset;
 reg        wb_transfer_done;
@@ -131,6 +153,45 @@ localparam WB_BTE_LINEAR_BURST = 2'b00;
 localparam WB_CTI_CLASSIC_CYCLE   = 3'b000;
 localparam WB_CTI_INC_BURST_CYCLE = 3'b010;
 localparam WB_CTI_END_BURST_CYCLE = 3'b111;
+
+assign conf_nb_tag_bits    = 19;
+assign conf_nb_mem_id_bits = 2;
+assign conf_nb_line_bits   = 7;
+assign conf_nb_word_bits   = 2;
+assign conf_nb_byte_bits   = 2;
+
+assign meta_dirty_mask = 32'b10;
+assign meta_valid_mask = 32'b1;
+
+always @(*) begin
+  addr_tag_mask    = (((33'b1 << (conf_nb_tag_bits)) - 1) << (conf_nb_mem_id_bits + conf_nb_line_bits + conf_nb_word_bits + conf_nb_byte_bits));
+  addr_mem_id_mask = (((33'b1 << (conf_nb_mem_id_bits)) - 1) << (conf_nb_line_bits + conf_nb_word_bits + conf_nb_byte_bits));
+  addr_line_mask   = (((33'b1 << (conf_nb_line_bits)) - 1) << (conf_nb_word_bits + conf_nb_byte_bits));
+  addr_word_mask   = (((33'b1 << (conf_nb_word_bits)) - 1) << (conf_nb_byte_bits));
+  addr_byte_mask   = ((33'b1 << (conf_nb_byte_bits)) - 1);
+
+  ahb5_addr_tag    = i_ahb5_addr & addr_tag_mask;
+  ahb5_addr_mem_id = i_ahb5_addr & addr_mem_id_mask;
+  ahb5_addr_line   = i_ahb5_addr & addr_line_mask;
+  ahb5_addr_word   = i_ahb5_addr & addr_word_mask;
+  ahb5_addr_byte   = i_ahb5_addr & addr_byte_mask;
+  case (i_ahb5_size)
+		3'b000:
+			case(ahb5_addr_byte)
+				2'b00: ahb5_byte_sel = 4'b0001;
+				2'b01: ahb5_byte_sel = 4'b0010;
+				2'b10: ahb5_byte_sel = 4'b0100;
+				2'b11: ahb5_byte_sel = 4'b1000;
+      endcase
+		3'b001:
+			case(ahb5_addr_byte)
+				2'b00, 2'b01: ahb5_byte_sel = 4'b0011;
+				2'b10, 2'b11: ahb5_byte_sel = 4'b1100;
+      endcase
+		default:
+      ahb5_byte_sel = 4'b1111;
+  endcase
+end
 
 always @(*) begin
   req_cacheable_addr   = (req_state == REQ_STATE_STALL) ? ~req_addr[31] : ~i_ahb5_addr[31];
@@ -244,19 +305,13 @@ generate
   end
 endgenerate
 
-assign mask_tag   = {{19{1'b1}}, {9{1'b0}}, {4{1'b0}}};
-assign mask_line  = {{19{1'b0}}, {9{1'b1}}, {4{1'b0}}};
-assign mask_word  = {{19{1'b0}}, {9{1'b0}}, {2{1'b1}}, {2{1'b0}}};
-assign mask_dirty = 32'b10;
-assign mask_valid = 32'b1;
-
 generate
   for (genvar i = 0; i < 4; i=i+1) begin
     always @(*) begin
-      lookup_tag[i]   = meta_lookup_out[i] & mask_tag;
-      lookup_valid[i] = |(meta_lookup_out[i] & mask_valid);
-      lookup_hit[i]   = lookup_valid[i] & (lookup_tag[i] == req_tag);
-      lookup_dirty[i] = lookup_valid[i] & ((meta_lookup_out[i] & mask_dirty) >> 1);
+      lookup_tag[i]   = meta_lookup_out[i] & addr_tag_mask;
+      lookup_valid[i] = |(meta_lookup_out[i] & meta_valid_mask);
+      lookup_hit[i]   = lookup_valid[i] & (lookup_tag[i] == req_addr_tag);
+      lookup_dirty[i] = lookup_valid[i] & ((meta_lookup_out[i] & meta_dirty_mask) >> 1);
     end
   end
 endgenerate
@@ -266,45 +321,37 @@ always @(posedge i_clk or negedge i_rst_n)begin
     req_addr <= 32'b0;
     req_size <= 3'b0;
     req_we   <= 1'b0;
+    
+    req_addr_tag    <= 32'b0;
+    req_addr_mem_id <= 32'b0;
+    req_addr_line   <= 32'b0;
+    req_addr_word   <= 32'b0;
   end else if(
     ((req_state == REQ_STATE_ADDR) & req_pending_transfer) |
     ((req_state == REQ_STATE_CACHE) & req_hit & req_pending_transfer) |
     ((req_state == REQ_STATE_BYPASS_RESPONSE) & req_pending_transfer)
   )begin
-    req_addr <= i_ahb5_addr;
+    req_addr <= i_ahb5_addr; 
     req_size <= i_ahb5_size;
     req_we   <= i_ahb5_we;
-  end 
-end
 
-always @(*)begin
-  req_tag  = req_addr & mask_tag;
-  req_line = req_addr & mask_line;
-  req_word = req_addr & mask_word;
-  case (req_size)
-		3'b000:
-			case(req_addr[1:0])
-				2'b00: req_data_mask = 32'h000000FF;
-				2'b01: req_data_mask = 32'h0000FF00;
-				2'b10: req_data_mask = 32'h00FF0000;
-				2'b11: req_data_mask = 32'hFF000000;
-      endcase
-		3'b001:
-			case(req_addr[1])
-				1'b0: req_data_mask = 32'h0000FFFF;
-				1'b1: req_data_mask = 32'hFFFF0000;
-      endcase
-		default:
-      req_data_mask = 32'hFFFFFFFF;
-  endcase
+    req_addr_tag    <= ahb5_addr_tag;
+    req_addr_mem_id <= ahb5_addr_mem_id;
+    req_addr_line   <= ahb5_addr_line;
+    req_addr_word   <= ahb5_addr_word;
+    req_data_mask   <= {{8{ahb5_byte_sel[3]}},
+                        {8{ahb5_byte_sel[2]}},
+                        {8{ahb5_byte_sel[1]}},
+                        {8{ahb5_byte_sel[0]}}};
+  end 
 end
 
 always @(*)begin
   req_hit = 1'b0;
   req_hit_mem_id = 2'b00;
   if(req_state == REQ_STATE_CACHE)begin
-    req_hit = lookup_hit[req_addr[12:11]];
-    req_hit_mem_id = (lookup_hit[req_addr[12:11]]) ? req_addr[12:11] : 2'b00;
+    req_hit = lookup_hit[`MEM_ID_ADDR(req_addr_mem_id)];
+    req_hit_mem_id = (lookup_hit[`MEM_ID_ADDR(req_addr_mem_id)]) ? `MEM_ID_ADDR(req_addr_mem_id) : 2'b00;
   end
 end
 
@@ -315,7 +362,7 @@ always @(*) begin
      (req_state == REQ_STATE_REFILL) |
      (req_state == REQ_STATE_UPDATE_META)
     )begin
-      req_miss_mem_id = req_addr[12:11];
+      req_miss_mem_id = `MEM_ID_ADDR(req_addr_mem_id);
     end
 end
 
@@ -362,11 +409,11 @@ generate
         ((req_state == REQ_STATE_CACHE) & req_hit) |
         (req_state == REQ_STATE_BYPASS_RESPONSE)
       )begin
-        meta_lookup_addr[i] = i_ahb5_addr[10:4]; 
-        data_lookup_addr[i] = i_ahb5_addr[10:2];
+        meta_lookup_addr[i] = `LINE_ADDR(ahb5_addr_line); 
+        data_lookup_addr[i] = `WORD_ADDR(ahb5_addr_line | ahb5_addr_word);
       end else begin
-        meta_lookup_addr[i] = req_addr[10:4]; 
-        data_lookup_addr[i] = req_addr[10:2];
+        meta_lookup_addr[i] = `LINE_ADDR(req_addr_line);
+        data_lookup_addr[i] = `WORD_ADDR(req_addr_line | req_addr_word);
       end
    end
   end 
@@ -377,6 +424,7 @@ always @(posedge i_clk or negedge i_rst_n)begin
     wb_state              <= WB_STATE_IDLE;
     wb_transfer_we        <= 1'b0;
     wb_transfer_size      <= 6'b0;
+    wb_byte_sel           <= 4'b0;
     wb_transfer_base_addr <= 32'b0;
     wb_word_offset        <= 4'b0;
   end
@@ -386,7 +434,8 @@ always @(posedge i_clk or negedge i_rst_n)begin
         wb_state              <= WB_STATE_WDATA_WAIT;
         wb_transfer_we        <= 1'b1;
         wb_transfer_size      <= 4;
-        wb_transfer_base_addr <= lookup_tag[mem_id] | req_line;
+        wb_byte_sel           <= 4'b1111;
+        wb_transfer_base_addr <= (lookup_tag[mem_id] | req_addr_mem_id | req_addr_line);
         wb_word_offset        <= 4'b0;
       end 
       else if(((req_state == REQ_STATE_LOOKUP) & ~req_miss_dirty) |
@@ -394,7 +443,8 @@ always @(posedge i_clk or negedge i_rst_n)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= 1'b0;
         wb_transfer_size      <= 4;
-        wb_transfer_base_addr <= req_tag | req_line;
+        wb_byte_sel           <= 4'b1111;
+        wb_transfer_base_addr <= (req_addr_tag | req_addr_mem_id | req_addr_line);
         wb_word_offset        <= 4'b0;
       end 
       else if(((req_state == REQ_STATE_ADDR) & req_bypass_start) | 
@@ -403,20 +453,23 @@ always @(posedge i_clk or negedge i_rst_n)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= i_ahb5_we;
         wb_transfer_size      <= 1;
-        wb_transfer_base_addr <= i_ahb5_addr & 32'hFFFFFFFC;
+        wb_byte_sel           <= ahb5_byte_sel;
+        wb_transfer_base_addr <= (ahb5_addr_tag | ahb5_addr_mem_id | ahb5_addr_line | ahb5_addr_word);
         wb_word_offset        <= 4'b0;
       end
       else if((req_state == REQ_STATE_STALL) & req_bypass_start)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= req_we;
         wb_transfer_size      <= 1;
-        wb_transfer_base_addr <= req_addr & 32'hFFFFFFFC;
+        wb_byte_sel           <= {req_data_mask[24], req_data_mask[16], req_data_mask[8], req_data_mask[0]};
+        wb_transfer_base_addr <= (req_addr_tag | req_addr_mem_id | req_addr_line | req_addr_word);
         wb_word_offset        <= 4'b0;
       end
       else if((flush_state == FLUSH_STATE_LOOKUP) & flush_writeback)begin
         wb_state              <= WB_STATE_WDATA_WAIT;
         wb_transfer_we        <= 1'b1;
         wb_transfer_size      <= 4;
+        wb_byte_sel           <= 4'b1111;
         wb_transfer_base_addr <= lookup_tag[mem_id] | {mem_id, flush_line[6:0], 4'b0000};
         wb_word_offset        <= 4'b0;
       end
@@ -452,20 +505,20 @@ always @(*)begin
   data_update_in[2]   = 32'b0;
   data_update_in[3]   = 32'b0;
   if((req_state == REQ_STATE_CACHE) & req_we & req_hit)begin
-    data_update_addr[mem_id] = req_addr[10:2];
+    data_update_addr[mem_id] = `WORD_ADDR(req_addr_line | req_addr_word);
     data_update_we[mem_id]   = 1'b1;
     data_update_in[mem_id]   = 
       (i_ahb5_wdata & req_data_mask) | 
       (data_lookup_out[mem_id] & ~req_data_mask);
   end 
   else if(req_state == REQ_STATE_EVICT)begin
-    data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset;
+    data_update_addr[mem_id] = `WORD_ADDR(req_addr_line) + wb_word_offset;
     if(i_wb_ack)begin
-      data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset + 1;
+      data_update_addr[mem_id] = `WORD_ADDR(req_addr_line) + wb_word_offset + 1;
     end
   end 
   else if((req_state == REQ_STATE_REFILL)     & i_wb_ack)begin
-    data_update_addr[mem_id] = {req_addr[10:4], 2'b00} + wb_word_offset;
+    data_update_addr[mem_id] = `WORD_ADDR(req_addr_line) + wb_word_offset;
     data_update_we[mem_id]   = 1'b1;
     data_update_in[mem_id]   = i_wb_rdata;
   end
@@ -491,14 +544,14 @@ always @(*) begin
   meta_update_in[2]   = 32'b0;
   meta_update_in[3]   = 32'b0;
   if((req_state == REQ_STATE_CACHE) & req_hit & req_we & ~lookup_dirty[mem_id])begin
-    meta_update_addr[mem_id] = req_addr[10:4];
+    meta_update_addr[mem_id] = `LINE_ADDR(req_addr_line);
     meta_update_we[mem_id]   = 1'b1;
-    meta_update_in[mem_id]   = meta_lookup_out[mem_id] | mask_dirty;
+    meta_update_in[mem_id]   = meta_lookup_out[mem_id] | meta_dirty_mask;
   end 
   else if(req_state == REQ_STATE_UPDATE_META)begin
-    meta_update_addr[mem_id] = req_addr[10:4]; 
+    meta_update_addr[mem_id] = `LINE_ADDR(req_addr_line); 
     meta_update_we[mem_id]   = 1'b1;
-    meta_update_in[mem_id]   = req_tag | mask_valid;
+    meta_update_in[mem_id]   = req_addr_tag | meta_valid_mask;
   end 
   else if((flush_state == FLUSH_STATE_LOOKUP) & ~flush_line_dirty)begin
     meta_update_addr[0] = flush_line;
