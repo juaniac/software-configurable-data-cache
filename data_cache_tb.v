@@ -1056,13 +1056,19 @@ module data_cache_tb;
     .i_wb_ack(i_wb_ack),
     .i_wb_err(i_wb_err),
     .i_flush(i_flush),
-    .i_cache_on(i_cache_on)
+    .i_cache_size(2'b11),
+    .i_associativity({1'b0, i_cache_on}),
+    .i_cache_line_size(2'b00),
+    .i_write_policy(1'b0)
   );
 
   // ------------------------------------------------------------------------
   // Clock and utility functions
   // ------------------------------------------------------------------------
   initial begin
+    $dumpfile("data_cache.vcd");
+    $dumpvars(0, dut);
+    
     i_clk = 1'b0;
     forever #5 i_clk = ~i_clk;
   end

@@ -27,14 +27,43 @@ module data_cache (
 
   // configurations
   input wire           i_flush,
-  input wire           i_cache_on
+  input wire  [1:0]    i_cache_size,
+  input wire  [1:0]    i_associativity,
+  input wire  [1:0]    i_cache_line_size,
+  input wire           i_write_policy
 );
+reg [1:0]  conf_cache_size;
+localparam CONF_1KB = 2'b00;
+localparam CONF_2KB = 2'b01;
+localparam CONF_4KB = 2'b10;
+localparam CONF_8KB = 2'b11;
 
-wire [4:0] conf_nb_tag_bits;
-wire [4:0] conf_nb_mem_id_bits;
-wire [4:0] conf_nb_line_bits;
-wire [4:0] conf_nb_word_bits;
-wire [4:0] conf_nb_byte_bits;
+reg [1:0]  conf_associativity;
+localparam CONF_OFF        = 2'b00;
+localparam CONF_DIRECT_MAP = 2'b01;
+localparam CONF_2_WAY_SET  = 2'b10;
+localparam CONF_4_WAY_SET  = 2'b11;
+
+reg [1:0]  conf_cache_line_size;
+localparam CONF_16B  = 2'b00;
+localparam CONF_32B  = 2'b01;
+localparam CONF_64B  = 2'b10;
+localparam CONF_128B = 2'b11;
+
+reg        conf_write_policy;
+localparam CONF_WRITE_BACK    = 1'b0;
+localparam CONF_WRITE_THROUGH = 1'b1;
+
+reg [5:0] conf_nb_tag_bits;
+reg [5:0] conf_nb_mem_id_bits;
+reg [5:0] conf_nb_line_bits;
+reg [5:0] conf_nb_word_bits;
+reg [5:0] conf_nb_byte_bits;
+
+reg       conf_cache_on;
+
+wire [6:0] conf_new;
+reg  [6:0] conf_active;
 
 reg [31:0] ahb5_addr_tag;
 reg [31:0] ahb5_addr_mem_id;
@@ -53,6 +82,7 @@ reg  [31:0] addr_line_mask;
 reg  [31:0] addr_word_mask;
 reg  [31:0] addr_byte_mask;
 
+wire  [31:0] meta_repl_mask; 
 wire  [31:0] meta_dirty_mask; 
 wire  [31:0] meta_valid_mask;
 
@@ -75,6 +105,7 @@ reg req_cacheable_addr;
 reg req_cache_start;
 reg req_bypass_start;
 reg req_stall_start;
+reg req_write_through;
 
 reg         meta_update_we   [3:0];
 reg  [8:0]  meta_update_addr [3:0];
@@ -102,6 +133,7 @@ reg [31:0] lookup_tag   [3:0];
 reg        lookup_dirty [3:0];
 reg        lookup_valid [3:0];
 reg        lookup_hit   [3:0];
+reg [5:0]  lookup_repl  [3:0];
 
 reg [31:0] req_addr;
 reg [31:0] req_addr_tag;
@@ -112,6 +144,7 @@ reg [2:0]  req_size;
 reg        req_we;
 reg [31:0] req_rdata;
 reg [31:0] req_data_mask;
+reg [1:0]  req_mem_id;
 reg        req_hit;
 reg [1:0]  req_hit_mem_id;
 reg [1:0]  req_miss_mem_id;
@@ -131,7 +164,6 @@ reg       flush_line_dirty;
 reg       flush_writeback;
 reg       flush_start;
 reg       flush_done;
-reg       flush_cache_was_on;
 
 reg [1:0] mem_id;
 
@@ -142,7 +174,7 @@ localparam WB_STATE_TRANSFER   = 2'b10;
 
 reg        wb_transfer_we;
 reg  [5:0] wb_transfer_size;
-reg  [3:0] wb_byte_sel;
+reg  [3:0] wb_transfer_byte_sel;
 reg [31:0] wb_transfer_base_addr;
 reg  [4:0] wb_word_offset;
 reg        wb_transfer_done;
@@ -154,12 +186,45 @@ localparam WB_CTI_CLASSIC_CYCLE   = 3'b000;
 localparam WB_CTI_INC_BURST_CYCLE = 3'b010;
 localparam WB_CTI_END_BURST_CYCLE = 3'b111;
 
-assign conf_nb_tag_bits    = 19;
-assign conf_nb_mem_id_bits = 2;
-assign conf_nb_line_bits   = 7;
-assign conf_nb_word_bits   = 2;
-assign conf_nb_byte_bits   = 2;
+assign conf_new = {i_cache_size, i_associativity, i_cache_line_size, i_write_policy};
 
+always @(posedge i_clk or negedge i_rst_n) begin
+  if(~i_rst_n)
+    conf_active <= {CONF_8KB, CONF_DIRECT_MAP, CONF_16B, CONF_WRITE_THROUGH};
+  else if(flush_done)
+    conf_active <= conf_new;
+end
+
+always @(*) begin
+  conf_cache_size      = conf_active[6:5];
+  conf_associativity   = conf_active[4:3];
+  conf_cache_line_size = conf_active[2:1];
+  conf_write_policy    = conf_active[0];
+
+  conf_nb_byte_bits = 6'd2;  
+  conf_nb_word_bits = (conf_cache_line_size == CONF_16B)  ? 6'd2 :
+                      (conf_cache_line_size == CONF_32B)  ? 6'd3 :
+                      (conf_cache_line_size == CONF_64B)  ? 6'd4 :
+                      (conf_cache_line_size == CONF_128B) ? 6'd5 :
+                                                            6'd0;
+  conf_nb_mem_id_bits = (conf_associativity == CONF_DIRECT_MAP) ? 6'd2 :
+                        (conf_associativity == CONF_2_WAY_SET)  ? 6'd1 :
+                        (conf_associativity == CONF_4_WAY_SET)  ? 6'd0 :
+                                                                  6'd0;
+  conf_nb_line_bits = ((conf_cache_size == CONF_1KB) ? 6'd10 :
+                      (conf_cache_size == CONF_2KB)  ? 6'd11 :
+                      (conf_cache_size == CONF_4KB)  ? 6'd12 :
+                      (conf_cache_size == CONF_8KB)  ? 6'd13 :
+                                                       6'd0)
+                      - (conf_nb_mem_id_bits + conf_nb_word_bits + conf_nb_byte_bits);
+  conf_nb_tag_bits    = 6'd32 - (conf_nb_mem_id_bits + conf_nb_line_bits + conf_nb_word_bits + conf_nb_byte_bits);
+
+  conf_cache_on = (conf_associativity == CONF_DIRECT_MAP) |
+                  (conf_associativity == CONF_2_WAY_SET) |
+                  (conf_associativity == CONF_4_WAY_SET);
+end
+
+assign meta_repl_mask  = 32'b11111100;
 assign meta_dirty_mask = 32'b10;
 assign meta_valid_mask = 32'b1;
 
@@ -196,9 +261,9 @@ end
 always @(*) begin
   req_cacheable_addr   = (req_state == REQ_STATE_STALL) ? ~req_addr[31] : ~i_ahb5_addr[31];
   req_pending_transfer = ((req_state == REQ_STATE_STALL) ? 1'b1 : i_ahb5_trans[1]);
-  req_cache_start      = req_pending_transfer & i_cache_on & req_cacheable_addr & ~flush_pending;
+  req_cache_start      = req_pending_transfer & conf_cache_on & req_cacheable_addr & ~flush_pending;
   req_bypass_start     = req_pending_transfer &
-                         (~req_cacheable_addr | (~flush_pending & ~i_cache_on)) &  
+                         (~req_cacheable_addr | (~flush_pending & ~conf_cache_on)) &  
                          ((flush_state == FLUSH_STATE_IDLE) |
                           (flush_state == FLUSH_STATE_ADDR) |
                           ((flush_state == FLUSH_STATE_LOOKUP) & ~flush_line_dirty) |
@@ -210,6 +275,7 @@ always @(*) begin
                           (flush_state == FLUSH_STATE_WRITEBACK) |
                           (wb_state == WB_STATE_WDATA_WAIT) |
                           (wb_state == WB_STATE_TRANSFER));
+  req_write_through    = req_we & (conf_write_policy == CONF_WRITE_THROUGH);
 end
 
 always @(posedge i_clk or negedge i_rst_n) begin
@@ -223,11 +289,12 @@ always @(posedge i_clk or negedge i_rst_n) begin
                      (req_stall_start)  ? REQ_STATE_STALL :
                                           REQ_STATE_ADDR;
       REQ_STATE_CACHE:
-        req_state <= (~req_hit)         ? REQ_STATE_LOOKUP :
-                     (req_cache_start)  ? REQ_STATE_CACHE :
-                     (req_bypass_start) ? REQ_STATE_BYPASS_TRANSFER :
-                     (req_stall_start)  ? REQ_STATE_STALL :
-                                          REQ_STATE_ADDR;
+        req_state <= (req_write_through) ? REQ_STATE_BYPASS_TRANSFER :
+                     (~req_hit)          ? REQ_STATE_LOOKUP :
+                     (req_cache_start)   ? REQ_STATE_CACHE :
+                     (req_bypass_start)  ? REQ_STATE_BYPASS_TRANSFER :
+                     (req_stall_start)   ? REQ_STATE_STALL :
+                                           REQ_STATE_ADDR;
       REQ_STATE_LOOKUP: 
         req_state <= (req_miss_dirty) ? REQ_STATE_EVICT :
                                         REQ_STATE_REFILL;     
@@ -312,6 +379,7 @@ generate
       lookup_valid[i] = |(meta_lookup_out[i] & meta_valid_mask);
       lookup_hit[i]   = lookup_valid[i] & (lookup_tag[i] == req_addr_tag);
       lookup_dirty[i] = lookup_valid[i] & ((meta_lookup_out[i] & meta_dirty_mask) >> 1);
+      lookup_repl[i]  = {6{lookup_valid[i]}} & ((meta_lookup_out[i] & meta_repl_mask) >> 2);
     end
   end
 endgenerate
@@ -328,7 +396,7 @@ always @(posedge i_clk or negedge i_rst_n)begin
     req_addr_word   <= 32'b0;
   end else if(
     ((req_state == REQ_STATE_ADDR) & req_pending_transfer) |
-    ((req_state == REQ_STATE_CACHE) & req_hit & req_pending_transfer) |
+    ((req_state == REQ_STATE_CACHE) & ~req_write_through & req_hit & req_pending_transfer) |
     ((req_state == REQ_STATE_BYPASS_RESPONSE) & req_pending_transfer)
   )begin
     req_addr <= i_ahb5_addr; 
@@ -349,21 +417,43 @@ end
 always @(*)begin
   req_hit = 1'b0;
   req_hit_mem_id = 2'b00;
+  req_mem_id = `MEM_ID_ADDR(req_addr_mem_id);
   if(req_state == REQ_STATE_CACHE)begin
-    req_hit = lookup_hit[`MEM_ID_ADDR(req_addr_mem_id)];
-    req_hit_mem_id = (lookup_hit[`MEM_ID_ADDR(req_addr_mem_id)]) ? `MEM_ID_ADDR(req_addr_mem_id) : 2'b00;
+    if(conf_associativity == CONF_DIRECT_MAP)begin
+      req_hit = lookup_hit[req_mem_id];
+      req_hit_mem_id = (lookup_hit[req_mem_id]) ? req_mem_id : 2'b00;
+    end 
+    else if(conf_associativity == CONF_2_WAY_SET) begin
+      req_hit = lookup_hit[{1'b0, req_mem_id[0]}] |
+                lookup_hit[{1'b1, req_mem_id[0]}];
+      req_hit_mem_id = (lookup_hit[{1'b0, req_mem_id[0]}]) ? {1'b0, req_mem_id[0]} :
+                       (lookup_hit[{1'b1, req_mem_id[0]}]) ? {1'b1, req_mem_id[0]} : 2'b00;
+    end
+    else if(conf_associativity == CONF_4_WAY_SET) begin
+      req_hit = lookup_hit[2'b00] |
+                lookup_hit[2'b01] |
+                lookup_hit[2'b10] |
+                lookup_hit[2'b11];
+      req_hit_mem_id = (lookup_hit[2'b00]) ? 2'b00 :
+                       (lookup_hit[2'b01]) ? 2'b01 :
+                       (lookup_hit[2'b10]) ? 2'b10 :
+                       (lookup_hit[2'b11]) ? 2'b11 : 2'b00;
+    end
   end
 end
 
-always @(*) begin
-  req_miss_mem_id = 2'b00;
-  if((req_state == REQ_STATE_LOOKUP) | 
-     (req_state == REQ_STATE_EVICT)  |
-     (req_state == REQ_STATE_REFILL) |
-     (req_state == REQ_STATE_UPDATE_META)
-    )begin
-      req_miss_mem_id = `MEM_ID_ADDR(req_addr_mem_id);
-    end
+always @(posedge i_clk or negedge i_rst_n) begin
+  if(~i_rst_n)begin
+    req_miss_mem_id <= 2'b00;
+  end
+  else if(req_state == REQ_STATE_CACHE & ~req_hit)begin
+    if(conf_associativity == CONF_DIRECT_MAP)
+      req_miss_mem_id <= req_mem_id;
+    else if(conf_associativity == CONF_2_WAY_SET)
+      req_miss_mem_id <= {lookup_repl[2'b00][0], req_mem_id[0]};
+    else if(conf_associativity == CONF_4_WAY_SET)
+      req_miss_mem_id <= lookup_repl[2'b00][1:0];
+  end
 end
 
 always @(*) begin
@@ -424,7 +514,7 @@ always @(posedge i_clk or negedge i_rst_n)begin
     wb_state              <= WB_STATE_IDLE;
     wb_transfer_we        <= 1'b0;
     wb_transfer_size      <= 6'b0;
-    wb_byte_sel           <= 4'b0;
+    wb_transfer_byte_sel  <= 4'b0;
     wb_transfer_base_addr <= 32'b0;
     wb_word_offset        <= 4'b0;
   end
@@ -433,8 +523,8 @@ always @(posedge i_clk or negedge i_rst_n)begin
       if((req_state == REQ_STATE_LOOKUP) & req_miss_dirty)begin
         wb_state              <= WB_STATE_WDATA_WAIT;
         wb_transfer_we        <= 1'b1;
-        wb_transfer_size      <= 4;
-        wb_byte_sel           <= 4'b1111;
+        wb_transfer_size      <= ((32'b1) << conf_nb_word_bits);
+        wb_transfer_byte_sel  <= 4'b1111;
         wb_transfer_base_addr <= (lookup_tag[mem_id] | req_addr_mem_id | req_addr_line);
         wb_word_offset        <= 4'b0;
       end 
@@ -442,8 +532,8 @@ always @(posedge i_clk or negedge i_rst_n)begin
                (req_state == REQ_STATE_BUS_WAIT))begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= 1'b0;
-        wb_transfer_size      <= 4;
-        wb_byte_sel           <= 4'b1111;
+        wb_transfer_size      <= ((32'b1) << conf_nb_word_bits);
+        wb_transfer_byte_sel  <= 4'b1111;
         wb_transfer_base_addr <= (req_addr_tag | req_addr_mem_id | req_addr_line);
         wb_word_offset        <= 4'b0;
       end 
@@ -453,23 +543,24 @@ always @(posedge i_clk or negedge i_rst_n)begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= i_ahb5_we;
         wb_transfer_size      <= 1;
-        wb_byte_sel           <= ahb5_byte_sel;
+        wb_transfer_byte_sel  <= ahb5_byte_sel;
         wb_transfer_base_addr <= (ahb5_addr_tag | ahb5_addr_mem_id | ahb5_addr_line | ahb5_addr_word);
         wb_word_offset        <= 4'b0;
       end
-      else if((req_state == REQ_STATE_STALL) & req_bypass_start)begin
+      else if(((req_state == REQ_STATE_STALL) & req_bypass_start) |
+              ((req_state == REQ_STATE_CACHE) & req_write_through))begin
         wb_state              <= WB_STATE_TRANSFER;
         wb_transfer_we        <= req_we;
         wb_transfer_size      <= 1;
-        wb_byte_sel           <= {req_data_mask[24], req_data_mask[16], req_data_mask[8], req_data_mask[0]};
+        wb_transfer_byte_sel  <= {req_data_mask[24], req_data_mask[16], req_data_mask[8], req_data_mask[0]};
         wb_transfer_base_addr <= (req_addr_tag | req_addr_mem_id | req_addr_line | req_addr_word);
         wb_word_offset        <= 4'b0;
       end
       else if((flush_state == FLUSH_STATE_LOOKUP) & flush_writeback)begin
         wb_state              <= WB_STATE_WDATA_WAIT;
         wb_transfer_we        <= 1'b1;
-        wb_transfer_size      <= 4;
-        wb_byte_sel           <= 4'b1111;
+        wb_transfer_size      <= ((32'b1) << conf_nb_word_bits);
+        wb_transfer_byte_sel  <= 4'b1111;
         wb_transfer_base_addr <= lookup_tag[mem_id] | {mem_id, flush_line[6:0], 4'b0000};
         wb_word_offset        <= 4'b0;
       end
@@ -543,10 +634,19 @@ always @(*) begin
   meta_update_in[1]   = 32'b0;
   meta_update_in[2]   = 32'b0;
   meta_update_in[3]   = 32'b0;
-  if((req_state == REQ_STATE_CACHE) & req_hit & req_we & ~lookup_dirty[mem_id])begin
+  if((req_state == REQ_STATE_CACHE) & req_hit & req_we & ~lookup_dirty[mem_id] & ~req_write_through)begin
     meta_update_addr[mem_id] = `LINE_ADDR(req_addr_line);
     meta_update_we[mem_id]   = 1'b1;
     meta_update_in[mem_id]   = meta_lookup_out[mem_id] | meta_dirty_mask;
+  end 
+  else if((req_state == REQ_STATE_LOOKUP) &
+          ((conf_associativity == CONF_2_WAY_SET) |
+           (conf_associativity == CONF_4_WAY_SET)))begin
+    meta_update_addr[2'b00] = `LINE_ADDR(req_addr_line);
+    meta_update_we[2'b00]   = 1'b1;
+    meta_update_in[2'b00]   = 
+      (meta_lookup_out[2'b00] & ~meta_repl_mask) |
+      ({(lookup_repl[2'b00] + 6'b1), 2'b00} & meta_repl_mask);
   end 
   else if(req_state == REQ_STATE_UPDATE_META)begin
     meta_update_addr[mem_id] = `LINE_ADDR(req_addr_line); 
@@ -576,10 +676,9 @@ end
 
 always @(posedge i_clk or negedge i_rst_n) begin
   if(~i_rst_n) begin
-    flush_state <= FLUSH_STATE_IDLE;
-    flush_pending      <= 1'b0;
-    flush_line         <= 9'b0;
-    flush_cache_was_on <= 1'b0;
+    flush_state   <= FLUSH_STATE_IDLE;
+    flush_pending <= 1'b1;
+    flush_line    <= 9'b0;
   end else begin
     case (flush_state)
       FLUSH_STATE_IDLE:
@@ -601,11 +700,10 @@ always @(posedge i_clk or negedge i_rst_n) begin
         flush_state <= FLUSH_STATE_IDLE;
     endcase
 
-    flush_cache_was_on <= i_cache_on;
     if((flush_state == FLUSH_STATE_LOOKUP) & ~flush_line_dirty)
       flush_line <= flush_line + 1;
 
-    if(i_flush | (flush_cache_was_on & ~i_cache_on))
+    if(i_flush | (|(conf_active ^ conf_new) & conf_cache_on))
       flush_pending <= 1'b1;
     
     if(flush_done)begin
@@ -637,6 +735,7 @@ always @(*) begin
                               (lookup_dirty[3] == 1'b1) ? 2'b11 : 
                               2'b00;
     flush_writeback = flush_line_dirty & 
+                      (conf_write_policy == CONF_WRITE_BACK) &
                       ((req_state == REQ_STATE_ADDR) | 
                        (req_state == REQ_STATE_STALL));
     flush_done      = (flush_state == FLUSH_STATE_LOOKUP) & (flush_line == (128-1)) & ~flush_line_dirty;
@@ -657,16 +756,15 @@ always @(*) begin
     o_wb_stb   = 1'b1;
     o_wb_we    = wb_transfer_we;
     o_wb_bte   = WB_BTE_LINEAR_BURST;
+    o_wb_sel   = wb_transfer_byte_sel;
     
     if(wb_transfer_size > 1)begin
       o_wb_cti   = (wb_word_offset < (wb_transfer_size-1)) ? WB_CTI_INC_BURST_CYCLE : WB_CTI_END_BURST_CYCLE;
-      o_wb_sel   = 4'b1111;
       o_wb_addr  = wb_transfer_base_addr | {wb_word_offset, 2'b00};
       if(wb_transfer_we)
         o_wb_wdata = data_update_out[mem_id];
     end else begin
       o_wb_cti   = WB_CTI_CLASSIC_CYCLE;
-      o_wb_sel   = {req_data_mask[24], req_data_mask[16], req_data_mask[8], req_data_mask[0]};
       o_wb_addr  = wb_transfer_base_addr;
       if(wb_transfer_we)  
         o_wb_wdata = i_ahb5_wdata;
@@ -684,7 +782,7 @@ end
 always @(*) begin
   o_ahb5_ready = 
     (req_state == REQ_STATE_ADDR) |
-    ((req_state == REQ_STATE_CACHE) & req_hit) |
+    ((req_state == REQ_STATE_CACHE) & req_hit & ~req_write_through) |
     (req_state == REQ_STATE_BYPASS_RESPONSE);
 
   o_ahb5_rdata = 32'b0;
