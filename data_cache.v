@@ -608,7 +608,7 @@ always @(*)begin
       data_update_addr[mem_id] = `WORD_ADDR(req_addr_line) + wb_word_offset + 1;
     end
   end 
-  else if((req_state == REQ_STATE_REFILL)     & i_wb_ack)begin
+  else if((req_state == REQ_STATE_REFILL) & i_wb_ack)begin
     data_update_addr[mem_id] = `WORD_ADDR(req_addr_line) + wb_word_offset;
     data_update_we[mem_id]   = 1'b1;
     data_update_in[mem_id]   = i_wb_rdata;
@@ -738,7 +738,7 @@ always @(*) begin
                       (conf_write_policy == CONF_WRITE_BACK) &
                       ((req_state == REQ_STATE_ADDR) | 
                        (req_state == REQ_STATE_STALL));
-    flush_done      = (flush_state == FLUSH_STATE_LOOKUP) & (flush_line == (128-1)) & ~flush_line_dirty;
+    flush_done      = (flush_state == FLUSH_STATE_LOOKUP) & (flush_line == (32'b1 << conf_nb_line_bits)) & ~flush_line_dirty;
   end
 end
 
