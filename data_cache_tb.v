@@ -1055,11 +1055,11 @@ module data_cache_tb;
     .i_wb_rdata(i_wb_rdata),
     .i_wb_ack(i_wb_ack),
     .i_wb_err(i_wb_err),
-    .i_flush(i_flush),
-    .i_cache_size(2'b11),
-    .i_associativity({1'b0, i_cache_on}),
-    .i_cache_line_size(2'b00),
-    .i_write_policy(1'b0)
+    .i_spr_flush(i_flush),
+    .i_spr_cache_size(2'b11),
+    .i_spr_associativity({1'b0, i_cache_on}),
+    .i_spr_cache_line_size(2'b00),
+    .i_spr_write_policy(1'b0)
   );
 
   // ------------------------------------------------------------------------
